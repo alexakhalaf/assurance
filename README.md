@@ -9,6 +9,9 @@ dependency on any external source of truth or orchestrator.
 
 ![Dashboard](docs/screenshots/dashboard.png)
 
+| ![1,000-device fleet](docs/screenshots/dashboard-1000-devices.png) | ![Dark theme](docs/screenshots/dashboard-dark.png) | ![Interfaces table](docs/screenshots/interfaces.png) |
+|---|---|---|
+
 | Change verification | Topology | Config diff |
 |---|---|---|
 | ![Verify](docs/screenshots/verify.png) | ![Topology](docs/screenshots/topology.png) | ![Config diff](docs/screenshots/compare-config.png) |
