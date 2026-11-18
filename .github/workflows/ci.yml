@@ -68,12 +68,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: docker build -t assurance:ci .
-      # Trivy's own image, pinned by digest (the trivy-action tags were withdrawn).
+      # Trivy's own image, pinned by digest (the trivy-action 0.28.0 tag no longer resolves).
       - name: Scan image
         run: >-
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/src:ro"
           aquasec/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
-          image --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1
+          image --skip-version-check --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1
           --ignorefile /src/.trivyignore assurance:ci
 
   e2e:

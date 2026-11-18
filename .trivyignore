@@ -1,2 +1,12 @@
 # Advisories accepted for the image scan, each with its reason. Review on every release.
-# (empty: no accepted findings yet)
+
+# python-engineio 4.9.1 / python-socketio 5.11.2: pyATS 26.10 pins engineio<4.10 and socketio<5.11.3
+# for its log viewer. Assurance never starts a Socket.IO server, so the DoS paths are unreachable.
+CVE-2026-48802
+CVE-2026-48809
+CVE-2026-48804
+
+# jaraco.context 5.3.0 and wheel 0.45.1 vendored inside setuptools 79.0.1 (pyATS pins setuptools<80).
+# Both are only used by setuptools when building or unpacking packages, which never happens at runtime.
+CVE-2026-23949
+CVE-2026-24049
