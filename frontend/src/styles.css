@@ -175,3 +175,27 @@ details summary { cursor: pointer; margin-bottom: 8px; }
 .changes .tbl { table-layout: fixed; }
 .changes .tbl td:nth-child(1) { width: 110px; }
 .changes .tbl td:nth-child(2) { width: 34%; word-break: break-all; }
+
+/* 0.5: config, checks, topology */
+.cfg { margin: 0; font: 12px/1.45 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
+.cfg-add { color: var(--good); background: var(--good-weak); display: block; }
+.cfg-del { color: var(--bad); background: var(--bad-weak); display: block; }
+.cfg-full { max-height: 70vh; overflow: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 12px; white-space: pre; }
+.badge-pass { background: var(--good-weak); color: var(--good); }
+.badge-warning { background: var(--warn-weak); color: var(--warn); }
+.badge-fail, .badge-error { background: var(--bad-weak); color: var(--bad); }
+.st-established, .st-full { color: var(--good); }
+.verdict { display: flex; align-items: center; gap: 16px; padding: 18px 20px; border-radius: var(--radius); border: 1px solid var(--line); background: var(--panel); }
+.verdict strong { font-size: 22px; }
+.verdict.pass { border-left: 5px solid var(--good); }
+.verdict.warning { border-left: 5px solid var(--warn); }
+.verdict.fail { border-left: 5px solid var(--bad); }
+.rule-row { cursor: pointer; }
+.rule-row:hover td { background: var(--accent-weak); }
+textarea { font: 12.5px/1.45 ui-monospace, Menlo, Consolas, monospace; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px; min-height: 180px; resize: vertical; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12.5px; color: var(--muted); }
+.legend i { display: inline-block; width: 18px; height: 3px; vertical-align: middle; margin-right: 6px; border-radius: 2px; }
+.report-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+.report-grid .card p { margin: 0 0 14px; }
+.nowrap { white-space: nowrap; }
+.filters input[type="checkbox"], .filters input[type="radio"] { min-width: 0; flex: none; }

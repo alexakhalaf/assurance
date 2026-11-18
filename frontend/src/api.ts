@@ -106,4 +106,7 @@ export interface Diff {
   from: { id: string; created_at: string; labels: string[] }; to: { id: string; created_at: string; labels: string[] };
   summary: any; changes: Change[]; total: number;
 }
-export const TABLES = ["facts", "interfaces", "routes", "arp", "neighbors"] as const;
+export const TABLES = ["facts", "interfaces", "routes", "arp", "neighbors", "bgp", "ospf", "mac", "vlans", "vrfs",
+  "hardware", "config"] as const;
+export interface CheckSummary { status: string; severity: string; violations: number; }
+export interface Violation { rule?: string; device: string; key: string; message: string; severity?: string; data?: any; }

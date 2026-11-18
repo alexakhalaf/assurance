@@ -128,7 +128,7 @@ export function ChangeList({ changes, hideDevice }: { changes: Change[]; hideDev
                   <tr key={c.key}>
                     <td><ChangeTag change={c.change} /></td>
                     <td className="mono">{c.key}</td>
-                    <td>{c.change === "changed" ? (
+                    <td>{c.table === "config" ? <ConfigLines change={c} /> : c.change === "changed" ? (
                       <ul className="fields">{c.fields_changed.map((f) => (
                         <li key={f}><span className="muted">{f}</span> <del>{short(c.before?.[f])}</del> → <ins>{short(c.after?.[f])}</ins></li>
                       ))}</ul>
@@ -148,6 +148,27 @@ function brief(table: string, v: Record<string, any>) {
   const keep: Record<string, string[]> = {
     facts: ["model", "os_version"], interfaces: ["oper_status", "description", "ipv4"],
     routes: ["protocol", "next_hops"], arp: ["mac", "interface"], neighbors: ["remote_device", "remote_interface"],
+    bgp: ["remote_as", "state", "prefixes_received"], ospf: ["address", "state"], mac: ["interfaces"],
+    vlans: ["name", "state"], vrfs: ["rd", "state"], hardware: ["pid", "serial"],
   };
   return (keep[table] || []).map((k) => `${k.replace(/_/g, " ")}: ${short(v[k])}`).join(" · ");
+}
+
+/** Line-level view of a changed config section: removed lines red, added lines green, the rest as context. */
+export function ConfigLines({ change }: { change: Change }) {
+  const before: string[] = change.before?.lines || [];
+  const after: string[] = change.after?.lines || [];
+  const gone = new Set(before.filter((l) => !after.includes(l)));
+  const added = new Set(after.filter((l) => !before.includes(l)));
+  const rows = [...before.filter((l) => gone.has(l)).map((l) => ["-", l]), ...after.map((l) => [added.has(l) ? "+" : " ", l])];
+  if (change.change === "removed") rows.splice(0, rows.length, ...before.map((l) => ["-", l]));
+  if (!rows.length) {
+    const sym = change.change === "removed" ? "-" : "+";
+    return <pre className="cfg"><span className={sym === "+" ? "cfg-add" : "cfg-del"}>{sym} {change.key.replace(/#\d+$/, "")}</span></pre>;
+  }
+  return (
+    <pre className="cfg">{rows.map(([s, l], i) => (
+      <span key={i} className={s === "+" ? "cfg-add" : s === "-" ? "cfg-del" : "muted"}>{s} {l}{"\n"}</span>
+    ))}</pre>
+  );
 }

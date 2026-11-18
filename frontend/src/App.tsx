@@ -1,19 +1,27 @@
 import { NavLink, Navigate, Route, Routes } from "react-router-dom";
 import { AuthProvider, useAuth } from "./auth";
+import Checks from "./pages/Checks";
 import Compare from "./pages/Compare";
 import Dashboard from "./pages/Dashboard";
 import DevicePage from "./pages/DevicePage";
 import Devices from "./pages/Devices";
 import Login from "./pages/Login";
+import PrePost from "./pages/PrePost";
+import Reports from "./pages/Reports";
 import Settings from "./pages/Settings";
 import SnapshotDetail from "./pages/SnapshotDetail";
 import Snapshots from "./pages/Snapshots";
+import Topology from "./pages/Topology";
 
 const NAV = [
   { to: "/", label: "Dashboard", icon: "◧" },
   { to: "/devices", label: "Devices", icon: "▤" },
   { to: "/snapshots", label: "Snapshots", icon: "◷" },
   { to: "/compare", label: "Compare", icon: "⇄" },
+  { to: "/checks", label: "Intent checks", icon: "✓" },
+  { to: "/verify", label: "Change verification", icon: "⇆" },
+  { to: "/topology", label: "Topology", icon: "⌘" },
+  { to: "/reports", label: "Reports", icon: "▦" },
   { to: "/settings", label: "Settings", icon: "⚙" },
 ];
 
@@ -52,6 +60,10 @@ function Shell() {
           <Route path="/snapshots" element={<Snapshots />} />
           <Route path="/snapshots/:id" element={<SnapshotDetail />} />
           <Route path="/compare" element={<Compare />} />
+          <Route path="/checks" element={<Checks />} />
+          <Route path="/verify" element={<PrePost />} />
+          <Route path="/topology" element={<Topology />} />
+          <Route path="/reports" element={<Reports />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

@@ -9,17 +9,22 @@ dependency on any external source of truth or orchestrator.
 
 ![Dashboard](docs/screenshots/dashboard.png)
 
-> Release **0.1 (lab alpha)**: inventory, credential store, Genie collection for the core tables,
-> snapshots, diff API, CLI and web UI. See [Roadmap](#roadmap) for what comes next.
+| Change verification | Topology | Config diff |
+|---|---|---|
+| ![Verify](docs/screenshots/verify.png) | ![Topology](docs/screenshots/topology.png) | ![Config diff](docs/screenshots/compare-config.png) |
+
+> Release **0.5 (beta)**: everything in 0.1 plus BGP, OSPF, MAC, VLAN, VRF, hardware and running-config
+> tables, intent checks, pre/post change verification, a topology map and reports. Verified against
+> captured mock data; not yet run against live devices. See [Roadmap](#roadmap).
 
 ## What it does
 
-| Area | 0.1 |
+| Area | Since 0.1 |
 |---|---|
 | Inventory | Devices, sites, tags, roles, status (active / maintenance / retired); CSV import with dry run; CSV export |
 | Credentials | Credential profiles, envelope-encrypted (AES-256-GCM, master key outside the DB); resolved device → site → `default`; write-only over the API |
 | Collection | SSH via pyATS/Unicon, parsing with Genie; one job per device on a Redis queue; per-device lock; jitter; partial results kept when a parser fails |
-| Data collected | Facts (`show version`), interfaces, IPv4 routes (all VRFs on NX-OS), ARP, CDP and LLDP neighbors |
+| Data collected | Facts, interfaces, IPv4 routes (all VRFs on NX-OS), ARP, CDP and LLDP neighbors; **0.5:** BGP sessions (all VRFs and address families), OSPF neighbors, MAC table, VLANs, VRFs, hardware inventory, running configuration |
 | Snapshots | On demand (API, CLI, UI) or on a cron schedule; labels (e.g. `change:CHG0012345`); per-device status; raw CLI text and full Genie output kept in S3 object storage |
 | Diff | Keyed diff per table: added / removed / changed with the fields that changed; volatile fields (counters, ages, uptime) ignored; failed devices reported as *unknown*, not as removed; time windows (`24h`, ISO times, `previous`, `latest`) |
 | History | Change timeline per device |
@@ -27,6 +32,16 @@ dependency on any external source of truth or orchestrator.
 | API | FastAPI under `/api/v1`, OpenAPI at `/api/v1/openapi.json`, docs at `/api/docs`; RFC 9457 problem JSON errors; signed webhooks |
 | Access | Local users (Argon2), roles viewer / operator / admin, login lockout, API tokens (hashed, expiring, revocable), audit log |
 | Operations | `/healthz`, `/readyz`, Prometheus `/metrics`, JSON logs with request ids, Alembic migrations, retention pruning |
+
+New in 0.5:
+
+| Area | What it does |
+|---|---|
+| Config | Running config is stored with secrets masked (`secret`, `password`, `key`, SNMP communities, pre-shared keys become `<removed>`) **before** it is written anywhere. Volatile lines (timestamps, "Last configuration change") are dropped. Config is split into sections, so a diff says which section changed, and a unified diff is available per device |
+| Intent checks | Every snapshot is graded on completion. 10 built-in state rules (BGP established, OSPF full, enabled interfaces up, MTU and duplex match on both ends of a link, no HTTP server, NTP, SSH v2, AAA, collection succeeded) and 5 delta rules for change verification. Custom rules in YAML or JSON: `row` (filter + assert on any table field), `config_require`, `config_forbid`, with scope by platform, site, role or device. Built-ins can be disabled; rules can be tested before saving |
+| Change verification | Pre/post compare by snapshot or by change label. Fails when a BGP session, OSPF adjacency or interface is lost, routes per VRF drop beyond a threshold, a device was not collected after, or a state check newly fails. CLI exits 5 on failure for pipelines |
+| Topology | Map from CDP and LLDP, managed and discovered nodes coloured by check results, links added or removed since any earlier snapshot |
+| Reports | Change, compliance and inventory reports as printable HTML (save as PDF), Excel and CSV, from the UI, API or CLI |
 
 ## Quick start (Docker Compose, single server)
 
@@ -76,6 +91,11 @@ assurance diff 24h now --table routes            # what changed in the last 24 h
 assurance diff <pre-id> <post-id> --fail-on-change   # exit 3 if anything changed
 assurance snapshots table routes --device yyc-core-rtr01 -q bgp
 assurance devices history yyc-core-rtr01 --since 7d
+assurance prepost --label change:CHG0012345     # exit 5 if verification fails
+assurance checks rules
+assurance checks show latest --severity fail --fail-on-violation
+assurance config diff yyc-core-rtr01 previous latest
+assurance report compliance --format xlsx -o compliance.xlsx
 ```
 
 `ASSURANCE_URL` and `ASSURANCE_TOKEN` override the stored login, which is handy in pipelines.
@@ -89,7 +109,8 @@ Server administration uses `assurance-admin`: `migrate`, `create-user`, `reset-p
 PRE=$(assurance snapshot --site YYC-DC1 --label change:CHG0012345)
 # ... make the change ...
 POST=$(assurance snapshot --site YYC-DC1 --label change:CHG0012345)
-assurance diff "$PRE" "$POST"
+assurance prepost --label change:CHG0012345      # PASS / WARN / FAIL with findings; exit 5 on FAIL
+assurance diff "$PRE" "$POST"                    # every change, for the record
 ```
 
 Snapshots with labels are kept by `assurance-admin prune`, so the evidence stays available.
@@ -112,12 +133,19 @@ Authenticate with `Authorization: Bearer <token>`: create a token under Settings
 | `GET /diffs?from=&to=` | Diff; `table`, `device`, `change`, `format=json\|text\|csv`. `since`/`until` are aliases for time windows |
 | `GET /devices/{name}/history` | Change timeline for one device |
 | `GET /stats/overview` | Dashboard numbers |
+| `GET/POST /checks/rules`, `PATCH/DELETE /checks/rules/{id}`, `POST /checks/rules/test` | Intent rules (admin to change) |
+| `GET /snapshots/{ref}/checks`, `POST /checks/run`, `GET /checks/trend` | Violations, re-grade, trend |
+| `POST /compare/prepost` | Change verification: `{pre, post}` or `{label}`, plus `route_drop_pct` |
+| `GET /topology?compare=&site=` | Nodes and links, with link changes |
+| `GET /diffs/config?device=&from=&to=`, `GET /devices/{name}/config` | Config diff and masked config |
+| `GET /reports/{changes,compliance,inventory}?format=html\|csv\|xlsx` | Reports |
 | `GET/POST /schedules`, `PATCH/DELETE /schedules/{name}` | Cron schedules (UTC) |
 | `POST /auth/login`, `/auth/logout`, `GET /auth/me`, `GET/POST/DELETE /auth/tokens` | Sessions and API tokens |
 | `GET/POST /users`, `PATCH /users/{name}` | Users (admin) |
 | `GET /audit` | Audit log (admin) |
 
-Tables: `facts`, `interfaces`, `routes`, `arp`, `neighbors`. A diff change looks like
+Tables: `facts`, `interfaces`, `routes`, `arp`, `neighbors`, `bgp`, `ospf`, `mac`, `vlans`, `vrfs`,
+`hardware`, `config`. A diff change looks like
 `{device, table, key, change: added|removed|changed, before, after, fields_changed}`.
 
 Webhooks: when `callback_url` is given, a `snapshot.finished` event is POSTed when the snapshot
@@ -167,6 +195,9 @@ Run the API locally with `uvicorn --factory assurance.api.app:create_app --reloa
 | `assurance/collection/` | Commands per OS, pyATS/Unicon and mock collectors, offline Genie parsing, normalizers |
 | `assurance/services/snapshots.py` | Snapshot lifecycle: create, per-device job, finalize, webhooks |
 | `assurance/services/diff.py` | Snapshot reference resolution and the keyed diff engine |
+| `assurance/services/checks.py` | Intent rules (built-in and custom), grading, pre/post verification |
+| `assurance/collection/configtext.py` | Secret masking, config cleaning and sectioning |
+| `assurance/api/routes/analysis.py` | Topology, config diffs, reports |
 | `assurance/services/inventory.py` | Scope resolution, validation, CSV import/export |
 | `assurance/services/credentials.py`, `security/crypto.py` | Credential profiles and envelope encryption |
 | `assurance/services/schedules.py` | Cron schedules and the scheduler loop |
@@ -191,11 +222,11 @@ Run the API locally with `uvicorn --factory assurance.api.app:create_app --reloa
 
 From the architecture doc's release plan:
 
-- **0.5 beta (pilot site):** remaining technology tables (BGP, OSPF, MAC, VLANs, port-channels, STP,
-  HSRP/VRRP, VRFs, NTP, inventory, configs), intent checks, topology maps, pre/post compare endpoint
-  with check profiles, reports, SSH host key pinning.
+- **0.5 beta (this release):** BGP, OSPF, MAC, VLANs, VRFs, hardware, configs, intent checks,
+  topology, pre/post verification, reports. Still to do for 0.5: port-channels, STP, HSRP/VRRP, NTP
+  tables, check profiles per change type, SSH host key pinning.
 - **1.0 GA:** HA deployment (Helm), OIDC SSO, backup/restore, OpenTelemetry tracing, hardening and pen test.
 
-Known gaps in 0.1: the live collector has not been run against real devices yet (mock data only);
-IOS-XE collects the global routing table only (no per-VRF commands yet); no IPv6; no
-reachability check when a device is added; no rate limiting on the API.
+Known gaps: the live collector has not been run against real devices yet (mock data only); IOS-XE
+collects the global routing table only (no per-VRF commands yet); no IPv6; no reachability check
+when a device is added; no rate limiting on the API; the topology map is one level (no site grouping).

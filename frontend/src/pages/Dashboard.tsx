@@ -8,6 +8,7 @@ import { ago, fmtTime, useApi } from "../hooks";
 export default function Dashboard() {
   const { data, error } = useApi<any>("/stats/overview", { snapshots: 48 }, (d) => d.snapshots_running > 0);
   const nav = useNavigate();
+  const checkTrend = useApi<any[]>("/checks/trend", { snapshots: 48 });
 
   const trendOption = useMemo(() => {
     if (!data) return {};
@@ -38,6 +39,11 @@ export default function Dashboard() {
   const latest = data.latest_snapshot;
   const ch = latest?.summary?.changes;
   const trend = data.trend as any[];
+  const cs = latest?.summary?.checks;
+  const ruleStates = Object.values(cs?.rules || {}) as any[];
+  const passing = ruleStates.filter((r) => r.status === "pass").length;
+  const worst = Object.entries((cs?.devices || {}) as Record<string, any>)
+    .sort((a, b) => b[1].fail - a[1].fail || b[1].warning - a[1].warning).slice(0, 6);
 
   return (
     <>
@@ -54,6 +60,9 @@ export default function Dashboard() {
           tone={ch?.total ? "warn" : undefined} />
         <Stat label="Collection failures" value={data.devices.failing.length}
           hint={data.devices.failing.slice(0, 3).join(", ") || "all devices collected"} tone={data.devices.failing.length ? "bad" : "good"} />
+        <Stat label="Intent compliance" value={ruleStates.length ? `${Math.round((passing / ruleStates.length) * 100)}%` : "—"}
+          hint={cs ? <Link to="/checks">{cs.fail} failing, {cs.warning} warning</Link> : "graded after each snapshot"}
+          tone={cs ? (cs.fail ? "bad" : cs.warning ? "warn" : "good") : undefined} />
         <Stat label="Snapshots" value={data.snapshot_count} hint={data.snapshots_running ? `${data.snapshots_running} running` : "stored"} />
       </div>
 
@@ -62,6 +71,29 @@ export default function Dashboard() {
           {trend.length < 2 ? <Empty>Changes appear here once there are two snapshots.</Empty> :
             <Chart option={trendOption} height={280}
               onClick={(p) => { const s = trend[p.dataIndex]; if (s) nav(`/compare?to=${s.id}`); }} />}
+        </Card>
+        <Card title="Check violations over time">
+          {(checkTrend.data?.length || 0) < 2 ? <Empty>Appears after two graded snapshots.</Empty> : (
+            <Chart height={220} option={{
+              tooltip: { trigger: "axis" },
+              xAxis: { type: "category", data: checkTrend.data!.map((s) => fmtTime(s.created_at)), ...axisStyle(), splitLine: { show: false } },
+              yAxis: { type: "value", minInterval: 1, ...axisStyle() },
+              series: [
+                { name: "Failing", type: "line", smooth: true, color: "#d9534f", areaStyle: { opacity: 0.08 }, data: checkTrend.data!.map((s) => s.fail) },
+                { name: "Warnings", type: "line", smooth: true, color: "#e8a33d", data: checkTrend.data!.map((s) => s.warning) },
+              ],
+            }} />
+          )}
+        </Card>
+        <Card title="Devices with most violations">
+          {worst.length === 0 ? <Empty>No violations on the latest snapshot.</Empty> : (
+            <table className="tbl">
+              <tbody>{worst.map(([name, c]) => (
+                <tr key={name}><td><Link to={`/devices/${name}`}>{name}</Link></td>
+                  <td className="num"><span className="bad">{c.fail} fail</span> · <span className="muted">{c.warning} warn</span></td></tr>
+              ))}</tbody>
+            </table>
+          )}
         </Card>
         <Card title="Platforms"><Chart option={pie(data.devices.by_platform)} height={220} /></Card>
         <Card title="OS versions">

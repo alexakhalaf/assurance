@@ -67,6 +67,13 @@ const COLS: Record<string, string[]> = {
   routes: ["vrf", "prefix", "protocol", "distance", "metric", "next_hops"],
   arp: ["vrf", "ip", "mac", "interface"],
   neighbors: ["protocol", "local_interface", "remote_device", "remote_interface", "remote_platform", "mgmt_ip"],
+  bgp: ["vrf", "neighbor", "address_family", "remote_as", "state", "prefixes_received"],
+  ospf: ["vrf", "interface", "neighbor_id", "address", "state"],
+  mac: ["vlan", "mac", "type", "interfaces"],
+  vlans: ["vlan_id", "name", "state", "interfaces"],
+  vrfs: ["name", "rd", "state", "interfaces"],
+  hardware: ["name", "description", "pid", "serial"],
+  config: ["lines"],
 };
 
 export function StateTable({ snapshot, table, device }: { snapshot: string; table: string; device?: string }) {
@@ -91,7 +98,9 @@ export function StateTable({ snapshot, table, device }: { snapshot: string; tabl
                 <tr key={r.device + r.key}>
                   {!device && <td>{r.device}</td>}
                   <td className="mono">{r.key}</td>
-                  {cols.map((c) => <td key={c} className={c.includes("status") ? `st-${r[c]}` : ""}>{short(r[c])}</td>)}
+                  {cols.map((c) => c === "lines"
+                    ? <td key={c}><pre className="cfg">{(r[c] || []).join("\n") || "—"}</pre></td>
+                    : <td key={c} className={c.includes("status") || c === "state" ? `st-${r[c]}` : ""}>{short(r[c])}</td>)}
                 </tr>
               ))}
             </tbody>

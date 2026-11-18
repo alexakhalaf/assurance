@@ -4,6 +4,7 @@ import { api, Change, Device, TABLES } from "../api";
 import { useAuth } from "../auth";
 import { Badge, Card, Empty, ErrorNote, PageHeader } from "../components/ui";
 import { fmtTime, useApi } from "../hooks";
+import { ViolationTable } from "./Checks";
 import { ChangeList } from "./Compare";
 import { DeviceForm } from "./Devices";
 import { StateTable } from "./SnapshotDetail";
@@ -17,6 +18,8 @@ export default function DevicePage() {
   const hist = useApi<any>(`/devices/${name}/history`, { since });
   const [tab, setTab] = useState<string>("interfaces");
   const [editing, setEditing] = useState(false);
+  const checks = useApi<any>("/snapshots/latest/checks", { device: name });
+  const config = useApi<string>(tab === "config" ? `/devices/${name}/config` : null);
   const d = dev.data;
 
   async function remove() {
@@ -65,8 +68,19 @@ export default function DevicePage() {
           <ChangeList changes={hist.data.events[0].changes as Change[]} hideDevice />
         </Card>
       )}
+      <Card title="Intent checks" actions={<Link to="/checks">All rules</Link>}>
+        <ViolationTable rows={checks.data?.violations || []} hideDevice />
+      </Card>
       <Card title="Current state" actions={<div className="tabs">{TABLES.map((t) => <button key={t} className={t === tab ? "tab active" : "tab"} onClick={() => setTab(t)}>{t}</button>)}</div>}>
-        <StateTable snapshot="latest" table={tab} device={name} />
+        {tab === "config" ? (
+          <>
+            <div className="filters">
+              <span className="muted">Running configuration, secrets masked. Diffs per section are in Compare.</span>
+              <Link className="btn sm" to={`/compare?device=${name}&table=config`}>Config changes</Link>
+            </div>
+            {config.error ? <Empty>{config.error}</Empty> : <pre className="cfg cfg-full">{config.data || "Loading…"}</pre>}
+          </>
+        ) : <StateTable snapshot="latest" table={tab} device={name} />}
       </Card>
       {editing && <DeviceForm device={d} onClose={() => setEditing(false)} onSaved={() => { setEditing(false); dev.reload(); }} />}
     </>
