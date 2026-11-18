@@ -1,0 +1,21 @@
+# Copy to inventory.yaml and list your devices. Credentials go in env vars, not here.
+defaults:
+  port: 22
+  protocol: ssh
+devices:
+  - name: yyc-core-rtr01
+    host: 10.10.0.1
+    platform: iosxe
+    site: YYC-DC1
+    role: core-router
+    tags: [core]
+  - name: yyc-dc-nxs01
+    host: 10.10.0.11
+    platform: nxos
+    site: YYC-DC1
+    role: dc-spine
+    tags: [dc]
+  - name: yyc-oob-term01      # unsupported platform: skipped with a warning
+    host: 10.10.0.250
+    platform: opengear
+    site: YYC-DC1

@@ -1,0 +1,20 @@
+[project]
+name = "assurance"
+version = "0.1.0"
+description = "Prototype network snapshot collector and differ (Cisco IOS-XE / NX-OS)"
+requires-python = ">=3.10"
+# pyats[library] brings Genie (parsers) and Unicon (device connections).
+dependencies = ["pyats[library]>=24.0", "pyyaml>=6"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+assurance = "assurance.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["assurance*"]

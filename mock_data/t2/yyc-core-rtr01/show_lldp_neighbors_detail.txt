@@ -1,0 +1,22 @@
+------------------------------------------------
+Local Intf: Gi2
+Chassis id: 2c6b.f5a0.0000
+Port id: ge-0/0/0
+Port Description: to yyc-core-rtr01 Gi2
+System Name: yyc-fw01
+
+System Description: 
+Juniper Networks, Inc. srx345 internet router, kernel JUNOS 22.4R3
+
+Time remaining: 101 seconds
+System Capabilities: B,R
+Enabled Capabilities: R
+Management Addresses:
+    IP: 10.10.0.21
+Auto Negotiation - supported, enabled
+Physical media capabilities:
+    1000baseT(FD)
+
+------------------------------------------------
+
+Total entries displayed: 1

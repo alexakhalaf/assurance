@@ -1,0 +1,35 @@
+-------------------------
+Device ID: yyc-dc-nxs01(FDO2331ABCD)
+Entry address(es): 
+  IP address: 10.10.0.11
+Platform: N9K-C93180YC-FX,  Capabilities: Router Switch IGMP Filtering Supports-STP-Dispute 
+Interface: GigabitEthernet1,  Port ID (outgoing port): Ethernet1/1
+Holdtime : 151 sec
+
+Version :
+Cisco Nexus Operating System (NX-OS) Software, Version 10.3(4a)
+
+advertisement version: 2
+Native VLAN: 1
+Duplex: full
+Management address(es): 
+  IP address: 10.10.0.11
+
+-------------------------
+Device ID: yyc-core-rtr02.corp.example
+Entry address(es): 
+  IP address: 10.10.0.2
+Platform: cisco C8300-1N1S-6T,  Capabilities: Router IGMP 
+Interface: GigabitEthernet3,  Port ID (outgoing port): GigabitEthernet3
+Holdtime : 165 sec
+
+Version :
+Cisco IOS Software [Dublin], Version 17.12.3
+
+advertisement version: 2
+Duplex: full
+Management address(es): 
+  IP address: 10.10.0.2
+
+
+Total cdp entries displayed : 2

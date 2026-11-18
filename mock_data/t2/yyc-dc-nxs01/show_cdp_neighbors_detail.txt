@@ -1,0 +1,24 @@
+Capability Codes: R - Router, T - Trans-Bridge, B - Source-Route-Bridge
+                  S - Switch, H - Host, I - IGMP, r - Repeater,
+                  V - VoIP-Phone, D - Remotely-Managed-Device,
+                  s - Supports-STP-Dispute
+
+----------------------------------------
+Device ID:yyc-core-rtr01
+System Name: yyc-core-rtr01
+
+Interface address(es):
+    IPv4 Address: 10.10.1.1
+Platform: cisco C8000V, Capabilities: Router IGMP_CNDS_Filtering
+Interface: Ethernet1/1, Port ID (outgoing port): GigabitEthernet1
+Holdtime: 158 sec
+
+Version:
+Cisco IOS Software [Dublin], Version 17.12.3
+
+Advertisement Version: 2
+
+Duplex: full
+
+Mgmt address(es):
+    IPv4 Address: 10.10.0.1

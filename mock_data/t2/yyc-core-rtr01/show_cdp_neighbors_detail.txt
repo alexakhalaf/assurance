@@ -1,0 +1,19 @@
+-------------------------
+Device ID: yyc-dc-nxs01(FDO2331ABCD)
+Entry address(es): 
+  IP address: 10.10.0.11
+Platform: N9K-C93180YC-FX,  Capabilities: Router Switch IGMP Filtering Supports-STP-Dispute 
+Interface: GigabitEthernet1,  Port ID (outgoing port): Ethernet1/1
+Holdtime : 151 sec
+
+Version :
+Cisco Nexus Operating System (NX-OS) Software, Version 10.3(4a)
+
+advertisement version: 2
+Native VLAN: 1
+Duplex: full
+Management address(es): 
+  IP address: 10.10.0.11
+
+
+Total cdp entries displayed : 1

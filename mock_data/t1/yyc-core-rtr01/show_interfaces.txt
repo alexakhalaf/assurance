@@ -1,0 +1,44 @@
+GigabitEthernet1 is up, line protocol is up
+  Hardware is CSR vNIC, address is 0050.56bf.1101 (bia 0050.56bf.1101)
+  Description: to yyc-dc-nxs01 Eth1/1
+  Internet address is 10.10.1.1/30
+  MTU 9000 bytes, BW 10000000 Kbit/sec, DLY 10 usec,
+     reliability 255/255, txload 1/255, rxload 1/255
+  Encapsulation ARPA, loopback not set
+  Keepalive set (10 sec)
+  Full Duplex, 10000Mbps, link type is auto, media type is Virtual
+  output flow-control is unsupported, input flow-control is unsupported
+  ARP type: ARPA, ARP Timeout 04:00:00
+  Last input 00:00:01, output 00:00:00, output hang never
+     5 minute input rate 12000 bits/sec, 15 packets/sec
+     1838372 packets input, 184729201 bytes, 0 no buffer
+GigabitEthernet2 is up, line protocol is up
+  Hardware is CSR vNIC, address is 0050.56bf.1102 (bia 0050.56bf.1102)
+  Description: to yyc-fw01 ge-0/0/0
+  Internet address is 10.10.2.1/30
+  MTU 1500 bytes, BW 1000000 Kbit/sec, DLY 10 usec,
+     reliability 255/255, txload 1/255, rxload 1/255
+  Encapsulation ARPA, loopback not set
+  Full Duplex, 1000Mbps, link type is auto, media type is Virtual
+GigabitEthernet3 is up, line protocol is up
+  Hardware is CSR vNIC, address is 0050.56bf.1103 (bia 0050.56bf.1103)
+  Description: to yyc-core-rtr02 Gi3
+  Internet address is 10.10.3.1/30
+  MTU 9000 bytes, BW 10000000 Kbit/sec, DLY 10 usec,
+     reliability 255/255, txload 1/255, rxload 1/255
+  Encapsulation ARPA, loopback not set
+  Full Duplex, 10000Mbps, link type is auto, media type is Virtual
+GigabitEthernet4 is administratively down, line protocol is down
+  Hardware is CSR vNIC, address is 0050.56bf.1104 (bia 0050.56bf.1104)
+  Description: spare
+  MTU 1500 bytes, BW 1000000 Kbit/sec, DLY 10 usec,
+     reliability 255/255, txload 1/255, rxload 1/255
+  Encapsulation ARPA, loopback not set
+  Auto Duplex, Auto Speed, link type is auto, media type is Virtual
+Loopback0 is up, line protocol is up
+  Hardware is Loopback
+  Description: router-id
+  Internet address is 10.10.0.1/32
+  MTU 1514 bytes, BW 8000000 Kbit/sec, DLY 5000 usec,
+     reliability 255/255, txload 1/255, rxload 1/255
+  Encapsulation LOOPBACK, loopback not set

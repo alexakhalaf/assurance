@@ -1,0 +1,5 @@
+snapshots/
+inventory.yaml
+__pycache__/
+*.egg-info/
+.venv/

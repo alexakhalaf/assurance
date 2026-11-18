@@ -1,0 +1,33 @@
+Capability codes:
+  (R) Router, (B) Bridge, (T) Telephone, (C) DOCSIS Cable Device
+  (W) WLAN Access Point, (P) Repeater, (S) Station, (O) Other
+Device ID            Local Intf      Hold-time  Capability  Port ID
+
+Chassis id: 0050.5601.ee01
+Port id: vmnic0
+Local Port id: Eth1/2
+Port Description: port 0 on vSwitch0
+System Name: yyc-esx01
+System Description: VMware ESX Releasebuild-22380479
+Time remaining: 180 seconds
+System Capabilities: B
+Enabled Capabilities: B
+Management Address: 10.250.0.101
+Management Address IPV6: not advertised
+Vlan ID: not advertised
+
+Chassis id: 0050.5601.ee03
+Port id: vmnic0
+Local Port id: Eth1/3
+Port Description: port 0 on vSwitch0
+System Name: yyc-esx03
+System Description: VMware ESX Releasebuild-22380479
+Time remaining: 180 seconds
+System Capabilities: B
+Enabled Capabilities: B
+Management Address: 10.250.0.103
+Management Address IPV6: not advertised
+Vlan ID: not advertised
+
+
+Total entries displayed: 2
