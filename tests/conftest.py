@@ -18,6 +18,7 @@ os.environ.update({
     "ASSURANCE_LOG_JSON": "false",
     "ASSURANCE_COLLECT_JITTER_SECONDS": "0",
     "ASSURANCE_WEBHOOK_SECRET": "test-webhook-secret",
+    "ASSURANCE_WEBHOOK_ALLOWED_HOSTS": '["hooks.example.com"]',
     "ASSURANCE_UI_DIST": str(ROOT / "tests" / "no-ui"),
 })
 

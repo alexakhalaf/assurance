@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from ... import __version__
 from ...collection.configtext import unified_diff
 from ...db import get_db
+from ...exports import safe_cell
 from ...models import CheckResult, Device, DeviceCollection, RawOutput, Snapshot, StateRow
 from ...services.diff import SnapshotNotFound, diff_snapshots, resolve_ref
 from ...storage import get_text
@@ -144,7 +145,7 @@ def _xlsx(sheets: dict[str, list[dict]]) -> bytes:
         for c in ws[1]:
             c.font = Font(bold=True)
         for r in rows:
-            ws.append([_cell(r.get(c)) for c in cols])
+            ws.append([safe_cell(_cell(r.get(c))) for c in cols])
         for i, c in enumerate(cols, start=1):
             width = max([len(str(c))] + [len(str(_cell(r.get(c)) or "")) for r in rows[:500]])
             ws.column_dimensions[get_column_letter(i)].width = min(60, width + 2)
@@ -172,7 +173,7 @@ def _csv(rows: list[dict]) -> str:
     w = csv.DictWriter(buf, fieldnames=cols)
     w.writeheader()
     for r in rows:
-        w.writerow({k: _cell(v) for k, v in r.items()})
+        w.writerow({k: safe_cell(_cell(v)) for k, v in r.items()})
     return buf.getvalue()
 
 

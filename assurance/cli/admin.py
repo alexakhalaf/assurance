@@ -5,7 +5,6 @@ import getpass
 import logging
 import os
 import sys
-from datetime import timedelta
 from pathlib import Path
 
 import typer
@@ -139,18 +138,12 @@ def scheduler(interval: float = 20.0):
 def prune(keep_days: int = typer.Option(30, help="Delete unlabelled snapshots older than this"),
           dry_run: bool = typer.Option(True, "--dry-run/--apply")):
     """Retention: delete old snapshots. Snapshots with any label are kept (change evidence)."""
-    from ..db import session_scope
-    from ..models import Snapshot, utcnow
+    from ..services.retention import prune as do_prune
 
-    cutoff = utcnow() - timedelta(days=keep_days)
-    with session_scope() as db:
-        old = [s for s in db.scalars(select(Snapshot).where(Snapshot.created_at < cutoff))
-               if not [label for label in (s.labels or []) if not label.startswith("schedule:")]]
-        typer.echo(f"{len(old)} snapshot(s) older than {keep_days} days without labels")
-        if not dry_run:
-            for s in old:
-                db.delete(s)
-            typer.echo("deleted")
+    r = do_prune(keep_days, dry_run)
+    typer.echo(f"{r['expired']} snapshot(s) older than {keep_days} days without labels")
+    if not dry_run:
+        typer.echo(f"deleted {r['deleted']}")
     # Raw objects are content-addressed and shared between snapshots: `gc-objects` removes orphans.
 
 

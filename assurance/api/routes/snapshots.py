@@ -4,21 +4,25 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import PlainTextResponse
-from sqlalchemy import func, select
+from sqlalchemy import Text, cast, func, or_, select
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from ...config import get_settings
 from ...db import get_db
+from ...exports import safe_cell
 from ...models import DeviceCollection, RawOutput, Snapshot, SnapshotStatus, StateRow
 from ...services import audit
 from ...services.diff import DIFFABLE, TABLES, SnapshotNotFound, diff_snapshots, render_text, resolve_ref
-from ...services.snapshots import EmptyScope, create_snapshot
+from ...services.diff import cache_clear as diff_cache_clear
+from ...services.snapshots import EmptyScope, WebhookTargetError, create_snapshot
 from ...storage import get_text
-from ..deps import Principal, client_ip, operator, viewer
+from ..deps import Principal, admin, client_ip, operator, viewer
 from ..schemas import Page, SnapshotDetail, SnapshotIn, SnapshotOut
 
 router = APIRouter()
@@ -51,6 +55,8 @@ def start_snapshot(body: SnapshotIn, request: Request, response: Response,
                                callback_url=str(body.callback_url) if body.callback_url else None)
     except EmptyScope as e:
         raise HTTPException(422, str(e)) from e
+    except WebhookTargetError as e:
+        raise HTTPException(422, str(e)) from e
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
     audit.record(db, p.name, "snapshot.create", snap.id,
@@ -75,11 +81,11 @@ def list_snapshots(
         q = q.where(Snapshot.created_at <= until)
     if status:
         q = q.where(Snapshot.status == status)
-    snaps = list(db.scalars(q.order_by(Snapshot.created_at.desc())))
     if label:
-        snaps = [s for s in snaps if label in (s.labels or [])]
-    return Page(items=[SnapshotOut.model_validate(s) for s in snaps[offset:offset + limit]],
-                total=len(snaps), limit=limit, offset=offset)
+        q = q.where(cast(Snapshot.labels, JSONB).contains([label]))
+    total = db.scalar(select(func.count()).select_from(q.subquery()))
+    snaps = db.scalars(q.order_by(Snapshot.created_at.desc()).offset(offset).limit(limit))
+    return Page(items=[SnapshotOut.model_validate(s) for s in snaps], total=total, limit=limit, offset=offset)
 
 
 @router.get("/snapshots/{ref}", response_model=SnapshotDetail, tags=["snapshots"])
@@ -88,38 +94,96 @@ def get_snapshot(ref: str, _: Principal = Depends(viewer), db: Session = Depends
     return _get(db, ref)
 
 
+RESERVED = {"device", "q", "limit", "offset", "format", "sort", "order"}
+FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+
+
+def _like(text: str) -> str:
+    return "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+def _field_filter(field: str, value: str):
+    """?field=value is an exact, case-insensitive match; ~value contains, !value is not equal,
+    and an empty value after ! or = matches a missing / null field."""
+    col = func.lower(StateRow.data[field].as_string())
+    if value.startswith("~"):
+        return col.like(_like(value[1:].lower()), escape="\\")
+    if value.startswith("!"):
+        v = value[1:].lower()
+        return col.is_not(None) if v == "" else or_(col.is_(None), col != v)
+    return col.is_(None) if value == "" else col == value.lower()
+
+
+@router.delete("/snapshots/{snapshot_id}", status_code=204, tags=["snapshots"])
+def delete_snapshot(snapshot_id: str, request: Request, p: Principal = Depends(admin),
+                    db: Session = Depends(get_db)):
+    """Delete one finished snapshot (admin). Stored outputs are removed later by `assurance-admin gc-objects`."""
+    from ...services.retention import OPEN, delete_snapshots
+
+    snap = db.get(Snapshot, snapshot_id)
+    if snap is None:
+        raise HTTPException(404, "Snapshot not found")
+    if snap.status in OPEN:
+        raise HTTPException(409, f"Snapshot is {snap.status}; wait for it to finish")
+    audit.record(db, p.name, "snapshot.delete", snap.id,
+                 {"created_at": snap.created_at.isoformat(), "labels": snap.labels}, client_ip(request))
+    db.commit()
+    delete_snapshots([snap.id])
+    diff_cache_clear()
+    return Response(status_code=204)
+
+
 @router.get("/snapshots/{ref}/tables/{table}", tags=["snapshots"])
 def get_table(
     ref: str, table: str, request: Request,
     _: Principal = Depends(viewer), db: Session = Depends(get_db),
     device: list[str] | None = Query(None),
     q: str | None = Query(None, description="Case-insensitive text search across the row"),
+    sort: str | None = Query(None, description="device, key or any row field"),
+    order: str = Query("asc", pattern="^(asc|desc)$"),
     limit: int = Query(500, ge=1, le=10000), offset: int = Query(0, ge=0),
     format: str = Query("json", pattern="^(json|csv)$"),
 ):
-    """Normalized state rows. Any other query parameter filters on a row field, e.g. ?vrf=default
-    or ?protocol=bgp or ?oper_status=down."""
+    """Normalized state rows, filtered, sorted and paged in the database.
+
+    Any other query parameter filters on a row field: ?vrf=default, ?oper_status=down,
+    ?synchronized=false (exact, case-insensitive), ?description=~uplink (contains), ?protocol=!bgp (not)."""
     if table not in TABLES:
         raise HTTPException(404, f"Unknown table {table!r}; tables: {', '.join(TABLES)}")
     snap = _get(db, ref)
-    stmt = select(StateRow.device_name, StateRow.key, StateRow.data).where(
-        StateRow.snapshot_id == snap.id, StateRow.table_name == table)
+    where = [StateRow.snapshot_id == snap.id, StateRow.table_name == table]
     if device:
-        stmt = stmt.where(StateRow.device_name.in_(device))
-    reserved = {"device", "q", "limit", "offset", "format"}
-    field_filters = {k: v for k, v in request.query_params.items() if k not in reserved}
-    needle = q.lower() if q else None
-    rows = []
-    for dev, key, data in db.execute(stmt.order_by(StateRow.device_name, StateRow.key)):
-        if any(str(data.get(k)) != v for k, v in field_filters.items()):
+        where.append(StateRow.device_name.in_(device))
+    for k, v in request.query_params.multi_items():
+        if k in RESERVED:
             continue
-        if needle and needle not in (dev + " " + key + " " + json.dumps(data)).lower():
-            continue
-        rows.append({"device": dev, "key": key, **data})
+        if not FIELD_RE.match(k):
+            raise HTTPException(422, f"Invalid filter field {k!r}")
+        where.append(_field_filter(k, v))
+    if q:
+        pat = _like(q.lower())
+        where.append(or_(func.lower(StateRow.device_name).like(pat, escape="\\"),
+                         func.lower(StateRow.key).like(pat, escape="\\"),
+                         func.lower(cast(StateRow.data, Text)).like(pat, escape="\\")))
+    if sort in (None, "device"):
+        keys = [StateRow.device_name, StateRow.key]
+    elif sort == "key":
+        keys = [StateRow.key, StateRow.device_name]
+    elif FIELD_RE.match(sort):
+        keys = [StateRow.data[sort], StateRow.device_name, StateRow.key]  # jsonb order: numbers numerically
+    else:
+        raise HTTPException(422, f"Invalid sort field {sort!r}")
+    if order == "desc":
+        keys = [k.desc().nulls_last() for k in keys]
+    else:
+        keys = [k.asc().nulls_last() for k in keys]
+    stmt = select(StateRow.device_name, StateRow.key, StateRow.data).where(*where).order_by(*keys)
     if format == "csv":
+        rows = [{"device": dev, "key": key, **data} for dev, key, data in db.execute(stmt)]
         return _csv(rows, f"{snap.id}-{table}.csv")
-    return {"snapshot": snap.id, "table": table, "total": len(rows), "limit": limit, "offset": offset,
-            "items": rows[offset:offset + limit]}
+    total = db.scalar(select(func.count()).select_from(StateRow).where(*where))
+    rows = [{"device": dev, "key": key, **data} for dev, key, data in db.execute(stmt.offset(offset).limit(limit))]
+    return {"snapshot": snap.id, "table": table, "total": total, "limit": limit, "offset": offset, "items": rows}
 
 
 def _csv(rows: list[dict], filename: str) -> Response:
@@ -130,7 +194,7 @@ def _csv(rows: list[dict], filename: str) -> Response:
     w = csv.DictWriter(buf, fieldnames=cols)
     w.writeheader()
     for r in rows:
-        w.writerow({k: json.dumps(v) if isinstance(v, (list, dict)) else v for k, v in r.items()})
+        w.writerow({k: safe_cell(json.dumps(v) if isinstance(v, (list, dict)) else v) for k, v in r.items()})
     return Response(buf.getvalue(), media_type="text/csv",
                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 

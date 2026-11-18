@@ -42,6 +42,17 @@ class Settings(BaseSettings):
     mock_root: Path = Path("./mock_data")
     collect_timeout: int = 60
     collect_jitter_seconds: float = 2.0
+    # Recovery: a device still "running" this long after it started (worker killed, pod evicted), or still
+    # "pending" this long after the snapshot was created (job lost from the queue), is marked failed so the
+    # snapshot can finish. Keep running > device_lock_seconds + the slowest device's collection time.
+    stale_running_minutes: int = 30
+    stale_pending_minutes: int = 360
+    # Retention, applied by the scheduler once an hour. 0 = keep forever. Labelled snapshots (change
+    # evidence) are kept; "schedule:" labels don't count.
+    retention_days: int = 0
+    # Webhooks may not target loopback, link-local (cloud metadata) or private addresses unless listed here
+    # (IPs, CIDRs or host names).
+    webhook_allowed_hosts: list[str] = []
     # SSH host key pinning: tofu = pin on first contact, strict = must be pinned beforehand, off = no check
     ssh_host_key_policy: Literal["tofu", "strict", "off"] = "tofu"
 

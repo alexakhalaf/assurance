@@ -4,7 +4,7 @@ Genie schemas differ a bit per OS and include volatile fields (counters, ages,
 timers). Normalizing keeps only state we care about, so diffs show real change.
 
   facts:      {"device": {hostname, os, os_version, model, serial, image}}
-  interfaces: {name: {admin_status, oper_status, description, ipv4, mtu, bandwidth_kbps, speed, duplex, mac}}
+  interfaces: {name: {admin_status, oper_status, description, ipv4, mtu, bandwidth_kbps, speed_mbps, duplex, mac}}
   routes:     {"<vrf>|<prefix>": {vrf, prefix, protocol, distance, metric, next_hops: [{via, interface}]}}
   arp:        {"<vrf>|<ip>": {vrf, ip, mac, interface}}
   neighbors:  {"<proto>|<local_if>|<remote>": {protocol, local_interface, remote_device,
@@ -42,9 +42,15 @@ def normalize_mac(mac):
     return ":".join(h[i:i + 2] for i in range(0, 12, 2)) if len(h) == 12 else mac.lower()
 
 
+_IP_OR_MAC = re.compile(r"^(\d{1,3}(\.\d{1,3}){3}|[0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4}"
+                        r"|([0-9a-f]{2}[:-]){5}[0-9a-f]{2})$", re.I)
+
+
 def _short_host(device_id: str) -> str:
-    """'yyc-dc-nxs01(FDO123)' or 'rtr02.corp.example' -> bare hostname."""
-    return re.sub(r"\([^)]*\)$", "", (device_id or "unknown").strip()).split(".")[0]
+    """'yyc-dc-nxs01(FDO123)' or 'rtr02.corp.example' -> bare hostname. An IP address or a MAC
+    chassis id (LLDP neighbors without a system name) is kept whole."""
+    name = re.sub(r"\([^)]*\)$", "", (device_id or "unknown").strip())
+    return name if _IP_OR_MAC.match(name) else name.split(".")[0]
 
 
 # --------------------------------------------------------------------- facts
@@ -80,6 +86,34 @@ def facts(g: dict) -> dict:
 
 # ---------------------------------------------------------------- interfaces
 
+def speed_mbps(port_speed, bandwidth_kbps=None) -> int | None:
+    """Port speed in Mb/s, the same on every platform.
+
+    IOS-XE reports '10000mbps' / '1gbps'; Genie's NX-OS parser keeps only the number of
+    '10 Gb/s' or '1000 Mb/s', so a bare number is read in whichever unit agrees with the
+    interface bandwidth. 'auto speed' / 'auto-speed' (not negotiated, link down) is None.
+    """
+    if port_speed is None:
+        return None
+    m = re.match(r"^\s*(\d+(?:\.\d+)?)\s*([kmgt]?)", str(port_speed).lower())
+    if not m:
+        return None
+    n, unit = float(m.group(1)), m.group(2)
+    if unit:
+        return int(n * {"k": 0.001, "m": 1, "g": 1000, "t": 1_000_000}[unit])
+    if bandwidth_kbps:
+        bw = float(bandwidth_kbps) / 1000
+        return int(n * 1000) if abs(bw - n * 1000) < abs(bw - n) else int(n)
+    return int(n)
+
+
+def normalize_duplex(v) -> str | None:
+    if not v:
+        return None
+    v = str(v).lower()
+    return "full" if "full" in v else "half" if "half" in v else "auto" if "auto" in v else v
+
+
 def interfaces(g: dict) -> dict:
     out = {}
     for name, i in (g or {}).items():
@@ -91,8 +125,8 @@ def interfaces(g: dict) -> dict:
             "ipv4": sorted((i.get("ipv4") or {}).keys()),
             "mtu": i.get("mtu"),
             "bandwidth_kbps": i.get("bandwidth"),
-            "speed": i.get("port_speed"),
-            "duplex": i.get("duplex_mode"),
+            "speed_mbps": speed_mbps(i.get("port_speed"), i.get("bandwidth")),
+            "duplex": normalize_duplex(i.get("duplex_mode")),
             "mac": normalize_mac(i.get("mac_address")),
         }
     return out
@@ -187,7 +221,7 @@ def lldp(g: dict) -> dict:
                     "protocol": "lldp",
                     "local_interface": local,
                     "remote_device": remote,
-                    "remote_interface": n.get("port_id", port_id),
+                    "remote_interface": expand_ifname(n.get("port_id") or port_id),
                     "remote_platform": n.get("system_description") or None,
                     "mgmt_ip": n.get("management_address") or n.get("management_address_v4"),
                 }

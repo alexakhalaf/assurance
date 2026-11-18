@@ -7,7 +7,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
@@ -60,7 +60,11 @@ def login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
         raise HTTPException(401, "Invalid username or password")
     locked = user.locked_until
     if locked is not None and (locked if locked.tzinfo else locked.replace(tzinfo=UTC)) > now:
-        raise HTTPException(423, "Account temporarily locked after repeated failed logins")
+        # Same answer as a wrong password, so a lockout doesn't confirm that the username exists.
+        verify_password(_DUMMY_HASH, body.password)
+        audit.record(db, body.username, "auth.login_locked", ip=client_ip(request))
+        db.commit()
+        raise HTTPException(401, "Invalid username or password (or the account is temporarily locked)")
     if not user.is_active or not verify_password(user.password_hash, body.password):
         user.failed_logins += 1
         if user.failed_logins >= s.max_failed_logins:
@@ -88,6 +92,33 @@ def logout(p: Principal = Depends(current_principal), db: Session = Depends(get_
 @router.get("/auth/me", response_model=UserOut)
 def me(p: Principal = Depends(current_principal)):
     return p.user
+
+
+class PasswordChangeIn(BaseModel):
+    current_password: str = Field(max_length=256)
+    new_password: str = Field(min_length=12, max_length=256)
+
+
+@router.post("/auth/password", status_code=204)
+def change_password(body: PasswordChangeIn, request: Request, p: Principal = Depends(current_principal),
+                    db: Session = Depends(get_db)):
+    """Change your own password. Your other sessions are signed out; this one stays."""
+    user = db.get(User, p.user.id)
+    if user.auth_source == "oidc":
+        raise HTTPException(409, "Single sign-on accounts have no password")
+    if not verify_password(user.password_hash, body.current_password):
+        audit.record(db, user.username, "auth.password_change_failed", ip=client_ip(request))
+        db.commit()
+        raise HTTPException(403, "Current password is wrong")
+    if body.new_password == body.current_password:
+        raise HTTPException(422, "The new password must be different")
+    user.password_hash = hash_password(body.new_password)
+    for t in db.scalars(select(ApiToken).where(ApiToken.user_id == user.id, ApiToken.kind == "session",
+                                               ApiToken.id != p.token.id)):
+        t.revoked = True
+    audit.record(db, user.username, "auth.password_change", ip=client_ip(request))
+    db.commit()
+    return Response(status_code=204)
 
 
 @router.get("/auth/tokens", response_model=list[ApiTokenOut])
@@ -147,8 +178,14 @@ def update_user(username: str, body: UserPatch, request: Request, p: Principal =
         raise HTTPException(409, "You cannot demote or disable your own account")
     changed = []
     if body.password:
+        if user.auth_source == "oidc":
+            raise HTTPException(409, "Single sign-on accounts have no password")
         user.password_hash = hash_password(body.password)
+        user.failed_logins, user.locked_until = 0, None
         changed.append("password")
+        # A reset is usually a response to a compromise: end every session the user has open.
+        for t in db.scalars(select(ApiToken).where(ApiToken.user_id == user.id, ApiToken.kind == "session")):
+            t.revoked = True
     if body.role:
         user.role = body.role
         changed.append("role")

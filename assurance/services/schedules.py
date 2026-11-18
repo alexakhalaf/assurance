@@ -40,7 +40,8 @@ def run_due(now: datetime | None = None) -> list[str]:
             # Skip if the previous run of this schedule is still going (no overlapping full-fleet runs).
             if sch.last_snapshot_id:
                 prev = db.get(Snapshot, sch.last_snapshot_id)
-                if prev is not None and prev.status in (SnapshotStatus.queued, SnapshotStatus.running):
+                if prev is not None and prev.status in (SnapshotStatus.queued, SnapshotStatus.running,
+                                                    SnapshotStatus.finalizing):
                     log.warning("schedule %s skipped: previous snapshot %s still %s", sch.name, prev.id, prev.status)
                     continue
             try:
@@ -52,6 +53,22 @@ def run_due(now: datetime | None = None) -> list[str]:
             sch.last_run_at, sch.last_snapshot_id = now, snap.id
             created.append(snap.id)
     return created
+
+
+_last_retention = 0.0
+
+
+def maintenance() -> None:
+    """Housekeeping on the leader: recover stale collections (every call) and apply retention (hourly)."""
+    global _last_retention
+    from .retention import prune
+    from .snapshots import reap_stale
+
+    reap_stale()
+    days = get_settings().retention_days
+    if days > 0 and time.monotonic() - _last_retention > 3600:
+        _last_retention = time.monotonic()
+        prune(days, dry_run=False)
 
 
 def scheduler_loop(interval: float = 20.0) -> None:  # pragma: no cover - long running
@@ -69,6 +86,7 @@ def scheduler_loop(interval: float = 20.0) -> None:  # pragma: no cover - long r
     use_redis = get_settings().job_backend == "rq"
     lock = jobs.redis_conn().lock("assurance:scheduler-leader", timeout=int(interval * 3)) if use_redis else None
     log.info("scheduler started")
+    last_maint = 0.0
     while not stop:
         try:
             if lock is None or lock.acquire(blocking=False) or lock.owned():
@@ -80,6 +98,9 @@ def scheduler_loop(interval: float = 20.0) -> None:  # pragma: no cover - long r
 
                 for name in run_due_reports():
                     log.info("scheduled report %s run", name)
+                if time.monotonic() - last_maint > 300:
+                    last_maint = time.monotonic()
+                    maintenance()
         except Exception:
             log.exception("scheduler tick failed")
         time.sleep(interval)

@@ -15,7 +15,7 @@ import threading
 from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..models import CollectionStatus, DeviceCollection, Snapshot, SnapshotStatus, StateRow
@@ -90,11 +90,24 @@ def _collected(db: Session, snapshot_id: str) -> tuple[set[str], set[str]]:
     return ok, failed
 
 
-def _index(db: Session, snapshot_id: str, tables, devices) -> dict:
-    q = select(StateRow.id, StateRow.device_name, StateRow.table_name, StateRow.key, StateRow.row_hash).where(
-        StateRow.snapshot_id == snapshot_id, StateRow.table_name.in_(tables), StateRow.device_name.in_(devices)
-    )
-    return {(d, t, k): (i, h) for i, d, t, k, h in db.execute(q)}
+def _changed_keys(db: Session, a_id: str, b_id: str, tables, devices) -> list[tuple]:
+    """Rows that differ between two snapshots, found in the database with one full outer join on
+    (device, table, key). Returns (device, table, key, a_row_id | None, b_row_id | None)."""
+    if not devices or not tables:
+        return []
+
+    def side(sid):
+        return (select(StateRow.id, StateRow.device_name, StateRow.table_name, StateRow.key, StateRow.row_hash)
+                .where(StateRow.snapshot_id == sid, StateRow.table_name.in_(tables),
+                       StateRow.device_name.in_(devices)).subquery())
+
+    ra, rb = side(a_id), side(b_id)
+    on = and_(ra.c.device_name == rb.c.device_name, ra.c.table_name == rb.c.table_name, ra.c.key == rb.c.key)
+    q = (select(func.coalesce(ra.c.device_name, rb.c.device_name), func.coalesce(ra.c.table_name, rb.c.table_name),
+                func.coalesce(ra.c.key, rb.c.key), ra.c.id, rb.c.id)
+         .select_from(ra.join(rb, on, full=True))
+         .where(or_(ra.c.id.is_(None), rb.c.id.is_(None), ra.c.row_hash != rb.c.row_hash)))
+    return [tuple(r) for r in db.execute(q)]
 
 
 def _load(db: Session, ids: list[int]) -> dict[int, dict]:
@@ -107,7 +120,12 @@ def _load(db: Session, ids: list[int]) -> dict[int, dict]:
 
 _cache: OrderedDict = OrderedDict()
 _cache_lock = threading.Lock()
-_CACHE_MAX = 64
+_CACHE_MAX = 16  # whole diffs; snapshots are immutable once finished, so entries never go stale
+
+
+def cache_clear() -> None:
+    with _cache_lock:
+        _cache.clear()
 
 
 def diff_snapshots(db: Session, a: Snapshot, b: Snapshot, tables: list[str] | None = None,
@@ -129,26 +147,22 @@ def diff_snapshots(db: Session, a: Snapshot, b: Snapshot, tables: list[str] | No
     both = sorted(a_ok & b_ok)
     unknown = sorted((a_all & b_all) - set(both))
 
-    ia, ib = _index(db, a.id, tables, both), _index(db, b.id, tables, both)
-    added = sorted(ib.keys() - ia.keys())
-    removed = sorted(ia.keys() - ib.keys())
-    changed = sorted(k for k in ia.keys() & ib.keys() if ia[k][1] != ib[k][1])
-
-    data = _load(db, [ib[k][0] for k in added] + [ia[k][0] for k in removed]
-                 + [ia[k][0] for k in changed] + [ib[k][0] for k in changed])
+    diffs = _changed_keys(db, a.id, b.id, tables, both)
+    data = _load(db, [i for *_, ia, ib in diffs for i in (ia, ib) if i is not None])
 
     changes = []
-    for k in added:
-        changes.append({"device": k[0], "table": k[1], "key": k[2], "change": "added",
-                        "before": None, "after": data[ib[k][0]], "fields_changed": []})
-    for k in removed:
-        changes.append({"device": k[0], "table": k[1], "key": k[2], "change": "removed",
-                        "before": data[ia[k][0]], "after": None, "fields_changed": []})
-    for k in changed:
-        before, after = data[ia[k][0]], data[ib[k][0]]
-        fields = sorted(f for f in set(before) | set(after) if before.get(f) != after.get(f))
-        changes.append({"device": k[0], "table": k[1], "key": k[2], "change": "changed",
-                        "before": before, "after": after, "fields_changed": fields})
+    for dev, table, key, ia, ib in diffs:
+        before, after = (data[ia] if ia else None), (data[ib] if ib else None)
+        if before is None:
+            changes.append({"device": dev, "table": table, "key": key, "change": "added",
+                            "before": None, "after": after, "fields_changed": []})
+        elif after is None:
+            changes.append({"device": dev, "table": table, "key": key, "change": "removed",
+                            "before": before, "after": None, "fields_changed": []})
+        else:
+            fields = sorted(f for f in set(before) | set(after) if before.get(f) != after.get(f))
+            changes.append({"device": dev, "table": table, "key": key, "change": "changed",
+                            "before": before, "after": after, "fields_changed": fields})
     order = {t: i for i, t in enumerate(TABLES)}
     changes.sort(key=lambda c: (c["device"], order[c["table"]], c["key"]))
 

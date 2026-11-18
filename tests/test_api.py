@@ -34,7 +34,8 @@ def test_login_lockout(client):
     for _ in range(5):
         assert client.post(f"{API}/auth/login", json={"username": "view", "password": "nope"}).status_code == 401
     r = client.post(f"{API}/auth/login", json={"username": "view", "password": PASSWORD})
-    assert r.status_code == 423
+    assert r.status_code == 401  # locked, but answered like a wrong password (no username confirmation)
+    assert "locked" in r.json()["detail"]
 
 
 def test_logout_revokes_session(client):

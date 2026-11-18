@@ -60,6 +60,7 @@ class DeviceStatus(StrEnum):
 class SnapshotStatus(StrEnum):
     queued = "queued"
     running = "running"
+    finalizing = "finalizing"  # every device finished; summary, diff and checks being computed
     complete = "complete"
     partial = "partial"
     failed = "failed"
