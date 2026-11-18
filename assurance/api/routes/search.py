@@ -5,9 +5,11 @@ import re
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import func, literal, select, text, true, union_all
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
+from ...config import get_settings
 from ...db import get_db
 from ...models import StateRow
 from ...services import search as svc
@@ -55,27 +57,43 @@ def search_history(q: str = Query(..., min_length=2, max_length=200), since: str
 def config_search(pattern: str = Query(..., min_length=1, max_length=500), snapshot: str = "latest",
                   device: list[str] | None = Query(None), regex: bool = False, limit: int = Query(2000, le=20000),
                   _: Principal = Depends(viewer), db: Session = Depends(get_db)):
-    """Search every device's running config (secrets masked). Returns each matching line with its section."""
-    try:
-        rx = re.compile(pattern if regex else re.escape(pattern), re.I)
-    except re.error as e:
-        raise HTTPException(422, f"invalid regex: {e}") from e
+    """Search every device's running config (secrets masked). Returns each matching line with its section.
+
+    Matching runs in PostgreSQL, under a statement timeout: a pathological regex from a user can then
+    cost at most CONFIG_SEARCH_TIMEOUT seconds of one database backend, never an API worker. Regexes are
+    PostgreSQL's (POSIX ARE, case-insensitive); \\b is accepted as a word boundary."""
     snap = _snap(db, snapshot)
-    stmt = select(StateRow.device_name, StateRow.key, StateRow.data).where(
-        StateRow.snapshot_id == snap.id, StateRow.table_name == "config")
+    if regex:
+        try:
+            re.compile(pattern)
+        except re.error as e:
+            raise HTTPException(422, f"invalid regex: {e}") from e
+        pg_pattern = pattern.replace("\\b", "\\y")  # Python word boundary -> PostgreSQL's
+        match = lambda col: col.op("~*")(pg_pattern)  # noqa: E731
+    else:
+        like = "%" + pattern.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        match = lambda col: col.ilike(like, escape="\\")  # noqa: E731
+    lines = func.jsonb_array_elements_text(func.coalesce(StateRow.data["lines"], text("'[]'::jsonb"))) \
+        .table_valued("value", with_ordinality="n").render_derived()
+    section = func.coalesce(StateRow.data["section"].as_string(), StateRow.key)
+    base = [StateRow.snapshot_id == snap.id, StateRow.table_name == "config"]
     if device:
-        stmt = stmt.where(StateRow.device_name.in_(device))
-    matches, devices = [], set()
-    for dev, key, data in db.execute(stmt.order_by(StateRow.device_name, StateRow.id)):
-        section = data.get("section") or key
-        if rx.search(section):
-            matches.append({"device": dev, "section": section, "line": section})
-            devices.add(dev)
-        for line in data.get("lines") or []:
-            if rx.search(line):
-                matches.append({"device": dev, "section": section, "line": line})
-                devices.add(dev)
-        if len(matches) >= limit:
-            break
-    return {"pattern": pattern, "regex": regex, "snapshot": snap.id, "devices": sorted(devices),
-            "total": len(matches), "matches": matches[:limit]}
+        base.append(StateRow.device_name.in_(device))
+    on_section = select(StateRow.device_name.label("device"), StateRow.id.label("rid"), literal(0).label("n"),
+                        section.label("section"), section.label("line")).where(*base, match(section))
+    on_line = (select(StateRow.device_name, StateRow.id, lines.c.n, section, lines.c.value)
+               .select_from(StateRow).join(lines, true()).where(*base, match(lines.c.value)))
+    u = union_all(on_section, on_line).subquery()
+    stmt = select(u.c.device, u.c.section, u.c.line).order_by(u.c.device, u.c.rid, u.c.n).limit(limit + 1)
+    timeout_ms = int(get_settings().config_search_timeout * 1000)
+    try:
+        db.execute(text(f"SET LOCAL statement_timeout = {timeout_ms}"))
+        rows = db.execute(stmt).all()
+    except DBAPIError as e:
+        db.rollback()
+        if "statement timeout" in str(e.orig).lower() or "canceling statement" in str(e.orig).lower():
+            raise HTTPException(422, "search took too long; narrow the pattern or pick devices") from e
+        raise HTTPException(422, f"invalid regex: {str(e.orig).splitlines()[0]}") from e
+    matches = [{"device": d, "section": sec, "line": line} for d, sec, line in rows[:limit]]
+    return {"pattern": pattern, "regex": regex, "snapshot": snap.id, "devices": sorted({m["device"] for m in matches}),
+            "total": len(matches), "truncated": len(rows) > limit, "matches": matches}

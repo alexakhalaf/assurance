@@ -117,6 +117,16 @@ services:
     healthcheck:
       disable: true
 
+  # Daily backup (database + stored outputs) into the "backups" volume, keeping 14 days. Copy them off
+  # the server, e.g. `docker compose cp backup:/backups ./backups` from a nightly cron. The master key
+  # is not in them: keep secrets/master.key somewhere safe, separately.
+  backup:
+    <<: *app
+    command: ["assurance-admin", "backup-loop", "/backups", "--keep-days", "${ASSURANCE_BACKUP_KEEP_DAYS:-14}"]
+    volumes: ["backups:/backups"]
+    healthcheck:
+      disable: true
+
   scheduler:
     <<: *app
     command: ["assurance-admin", "scheduler"]
@@ -134,3 +144,4 @@ volumes:
   redisdata:
   objdata:
   caddydata:
+  backups:

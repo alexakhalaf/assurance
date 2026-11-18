@@ -35,7 +35,8 @@ RUN if [ -n "$PG_CLIENT" ]; then \
  && if [ -n "$APT_PACKAGES" ]; then apt-get update && apt-get install -y --no-install-recommends $APT_PACKAGES; fi \
  && if [ -n "$PG_CLIENT" ]; then apt-get purge -y curl && apt-get autoremove -y; fi \
  && apt-get clean && rm -rf /var/lib/apt/lists/* \
- && useradd --system --uid 10001 --home /home/assurance --create-home assurance
+ && useradd --system --uid 10001 --home /home/assurance --create-home assurance \
+ && install -d -o assurance -m 0700 /backups
 COPY --from=build /opt/venv /opt/venv
 COPY mock_data /app/mock_data
 ENV PATH=/opt/venv/bin:$PATH PYTHONUNBUFFERED=1 \

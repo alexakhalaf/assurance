@@ -53,8 +53,24 @@ export function EmptyState({ icon = "facts", title, children, action }: { icon?:
   );
 }
 
+/** "no latest snapshot", "no previous snapshot": a fresh install, not a failure. */
+export const NO_SNAPSHOT = /^no (latest|previous) snapshot/i;
+
+export function NoSnapshotYet({ error }: { error: string }) {
+  const previous = /previous/i.test(error);
+  return (
+    <EmptyState icon="snapshots" title={previous ? "Needs two snapshots" : "No snapshots yet"}
+      action={<Link className="btn primary" to="/snapshots">Go to snapshots</Link>}>
+      {previous ? "Changes compare two snapshots. Take another one and this page fills in."
+        : "Take the first snapshot to see this data."}
+    </EmptyState>
+  );
+}
+
 export function ErrorNote({ error }: { error: string | null | undefined }) {
-  return error ? <div className="alert" role="alert">{error}</div> : null;
+  if (!error) return null;
+  if (NO_SNAPSHOT.test(error)) return <NoSnapshotYet error={error} />;
+  return <div className="alert" role="alert">{error}</div>;
 }
 
 export function PageHeader({ title, sub, actions, crumbs }: { title: ReactNode; sub?: ReactNode; actions?: ReactNode; crumbs?: [string, string?][] }) {

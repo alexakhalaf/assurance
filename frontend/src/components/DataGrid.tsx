@@ -2,6 +2,7 @@ import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { useDebounced, useLocal } from "../hooks";
 import { Icon } from "./Icon";
+import { NO_SNAPSHOT, NoSnapshotYet } from "./ui";
 
 export interface Col<R = any> {
   key: string;
@@ -153,7 +154,8 @@ export function DataGrid<R = any>(props: Props<R>) {
         {onExport && <button className="btn sm" onClick={() => onExport(query)}><Icon name="download" size={14} /> CSV</button>}
       </div>
       {loading ? <div className="loading-bar" /> : <div style={{ height: 2 }} />}
-      {error && <div className="alert" style={{ margin: 12 }}>{error}</div>}
+      {error && (NO_SNAPSHOT.test(error) ? <NoSnapshotYet error={error} />
+        : <div className="alert" style={{ margin: 12 }}>{error}</div>)}
       <div className={`grid-scroll ${autoHeight ? "auto" : ""}`}>
         <table>
           <thead>

@@ -210,13 +210,20 @@ pre { margin: 0; }
   .grid-3 { grid-template-columns: 1fr 1fr; }
 }
 @media (max-width: 860px) {
-  .shell { grid-template-columns: 1fr; }
+  .shell { grid-template-columns: minmax(0, 1fr); }
   .sidenav { display: none; }
   .shell.nav-open .sidenav { display: block; position: fixed; top: var(--top-h); bottom: 0; left: 0; width: 260px; z-index: 30; }
   .topbar .brand { width: auto; border-right: 0; }
   .top-search { display: none; }
   .grid-2, .grid-3 { grid-template-columns: 1fr; }
   .page { padding: 16px; }
+}
+@media (max-width: 640px) {
+  .topbar .brand span, .snap-btn .lbl { display: none; }
+  .snap-btn { max-width: 44vw; }
+  .topbar { gap: 6px; padding-right: 8px; }
+  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .page-h .actions { width: 100%; }
 }
 
 /* ------------------------------------------------------------------ cards */

@@ -184,6 +184,33 @@ def backup(out: Path = typer.Argument(None, help="Archive path (default assuranc
         typer.echo(f"warning: {len(m['missing_objects'])} referenced object(s) were missing from the store", err=True)
 
 
+@app.command("backup-loop")
+def backup_loop(directory: Path = typer.Argument(..., help="Where archives go"),
+                every_hours: float = typer.Option(24, help="Hours between backups"),
+                keep_days: int = typer.Option(14, help="Remove this tool's archives older than this")):
+    """Back up on a timer (the Compose "backup" service). Only files named assurance-backup-*.tar in the
+    directory are ever removed, and only after a new backup succeeded."""
+    import time
+    from datetime import UTC, datetime
+
+    from ..services.backup import BackupError, create
+
+    directory.mkdir(parents=True, exist_ok=True)
+    while True:  # pragma: no cover - long running
+        out = directory / f"assurance-backup-{datetime.now(UTC):%Y%m%dT%H%M%SZ}.tar"
+        try:
+            m = create(out, True, None)
+            typer.echo(f"wrote {m['path']} ({m['bytes'] / 1e6:.1f} MB)")
+            cutoff = time.time() - keep_days * 86400
+            for old in directory.glob("assurance-backup-*.tar"):
+                if old != out and old.stat().st_mtime < cutoff:
+                    old.unlink()
+                    typer.echo(f"removed {old}")
+        except BackupError as e:
+            typer.echo(f"backup failed: {e}", err=True)
+        time.sleep(every_hours * 3600)
+
+
 @app.command()
 def restore(archive: Path = typer.Argument(..., exists=True, dir_okay=False),
             objects: bool = typer.Option(True, "--objects/--no-objects"),

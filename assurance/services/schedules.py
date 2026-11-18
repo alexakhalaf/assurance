@@ -68,7 +68,16 @@ def maintenance() -> None:
     s = get_settings()
     if (s.retention_days > 0 or s.retention_thin_after_days > 0) and time.monotonic() - _last_retention > 3600:
         _last_retention = time.monotonic()
-        prune(s.retention_days, dry_run=False, thin_after_days=s.retention_thin_after_days)
+        r = prune(s.retention_days, dry_run=False, thin_after_days=s.retention_thin_after_days)
+        if r["deleted"]:
+            # Stored outputs are shared between snapshots; remove the ones nothing references any more
+            # (24 h grace, so outputs of a collection still being written are never touched).
+            from .backup import gc_objects
+
+            try:
+                gc_objects(grace_hours=24, dry_run=False)
+            except Exception:  # the object store being down must not stop the scheduler
+                log.exception("object cleanup after retention failed")
 
 
 def scheduler_loop(interval: float = 20.0) -> None:  # pragma: no cover - long running

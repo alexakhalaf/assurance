@@ -209,6 +209,7 @@ All settings are environment variables (or `.env`), prefixed `ASSURANCE_`.
 | `RETENTION_THIN_AFTER_DAYS` | `0` | Snapshots older than this are thinned to the last routine one per UTC day (evidence is kept). `0` turns it off |
 | `STALE_RUNNING_MINUTES`, `STALE_PENDING_MINUTES` | `30`, `360` | A device collection stuck this long (worker killed, Redis flushed) is marked failed so its snapshot finishes |
 | `WEBHOOK_ALLOWED_HOSTS` | `[]` | Snapshot webhooks to private, loopback or link-local addresses are refused unless the host is listed |
+| `CONFIG_SEARCH_TIMEOUT` | `15` | Seconds a config search may run in the database (bounds user regexes) |
 | `METRICS_TOKEN` | | When set, `/metrics` needs `Authorization: Bearer <token>` |
 | `TRUSTED_PROXIES` | `[]` | JSON list of proxy IPs/CIDRs whose `X-Forwarded-For` is believed, e.g. `["10.0.0.0/8"]` |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM` | | Mail server for scheduled reports |
@@ -248,7 +249,12 @@ manifest with the schema revision and a checksum. Restore checks both, replaces 
 back any object missing from the store, then migrates to the running version, so a backup from an
 older release restores into a newer one. Use `--no-objects` when the bucket has its own replication.
 The **master key is not in the backup**; keep it with your secrets, or restored device credentials
-cannot be decrypted. With Compose: `docker compose run --rm -v $PWD:/backups api assurance-admin backup /backups/a.tar`.
+cannot be decrypted. With Compose, the `backup` service writes one archive a day to the `backups`
+volume and keeps `ASSURANCE_BACKUP_KEEP_DAYS` (14) days of them; copy them off the server with
+`docker compose cp backup:/backups ./backups` from a nightly cron. A one-off backup:
+`docker compose run --rm -v $PWD:/out api assurance-admin backup /out/a.tar`. In Helm, set
+`backup.enabled=true` for a CronJob. After retention deletes snapshots, the scheduler also removes
+stored outputs nothing references any more (24-hour grace).
 
 ## Upgrading
 

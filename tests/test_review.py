@@ -271,3 +271,17 @@ def test_retention_thins_to_one_per_day(client, inventory, oper_h, view_h):
     assert r == {"expired": 0, "deleted": 1, "thinned": 1}
     left = {s["id"] for s in client.get(f"{API}/snapshots", headers=view_h).json()["items"]}
     assert left == {ids[1], ids[2], ids[3], ids[4]}  # day 1 keeps its last routine one and the evidence
+
+
+def test_config_search_runs_in_the_database(client, two_snapshots, view_h):
+    def search(**p):
+        return client.get(f"{API}/search/config", params=p, headers=view_h)
+
+    word = search(pattern=r"\bmtu 9216\b", regex=True).json()  # Python \b works (mapped to PostgreSQL \y)
+    assert word["total"] > 0 and all("mtu 9216" in m["line"] for m in word["matches"])
+    literal_pct = search(pattern="100%").json()  # % and _ are literal in a plain search
+    assert literal_pct["total"] == 0
+    capped = search(pattern="interface", limit=1).json()
+    assert capped["total"] == 1 and capped["truncated"] is True
+    # a classic catastrophic-backtracking pattern returns promptly instead of pinning an API worker
+    assert search(pattern="(a+)+$", regex=True).status_code == 200

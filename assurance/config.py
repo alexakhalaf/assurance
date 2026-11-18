@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     # Retention, applied by the scheduler once an hour. 0 = keep forever. Labelled snapshots (change
     # evidence) are kept; "schedule:" labels don't count.
     retention_days: int = 0
+    config_search_timeout: float = 15.0  # seconds; bounds a user-supplied regex
     # After this many days, routine snapshots are thinned to one per day (0: never). Hourly snapshots
     # of 500 devices are ~0.5M rows each; thinning keeps a year of history affordable.
     retention_thin_after_days: int = 0
