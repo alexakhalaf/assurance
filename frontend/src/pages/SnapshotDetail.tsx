@@ -73,6 +73,10 @@ const COLS: Record<string, string[]> = {
   vlans: ["vlan_id", "name", "state", "interfaces"],
   vrfs: ["name", "rd", "state", "interfaces"],
   hardware: ["name", "description", "pid", "serial"],
+  portchannels: ["protocol", "oper_status", "layer", "members_bundled", "members_down"],
+  stp: ["mode", "is_root", "root_address", "root_priority", "root_port", "bridge_priority", "ports"],
+  fhrp: ["interface", "protocol", "group", "state", "priority", "virtual_ip", "active_router", "standby_router"],
+  ntp: ["vrf", "stratum", "mode", "synchronized"],
   config: ["lines"],
 };
 
@@ -100,6 +104,7 @@ export function StateTable({ snapshot, table, device }: { snapshot: string; tabl
                   <td className="mono">{r.key}</td>
                   {cols.map((c) => c === "lines"
                     ? <td key={c}><pre className="cfg">{(r[c] || []).join("\n") || "—"}</pre></td>
+                    : c === "ports" ? <td key={c} className="mono">{Object.entries(r[c] || {}).map(([i, role]) => `${i} ${role}`).join(", ") || "—"}</td>
                     : <td key={c} className={c.includes("status") || c === "state" ? `st-${r[c]}` : ""}>{short(r[c])}</td>)}
                 </tr>
               ))}

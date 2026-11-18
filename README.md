@@ -13,8 +13,8 @@ dependency on any external source of truth or orchestrator.
 |---|---|---|
 | ![Verify](docs/screenshots/verify.png) | ![Topology](docs/screenshots/topology.png) | ![Config diff](docs/screenshots/compare-config.png) |
 
-> Release **0.5 (beta)**: everything in 0.1 plus BGP, OSPF, MAC, VLAN, VRF, hardware and running-config
-> tables, intent checks, pre/post change verification, a topology map and reports. Verified against
+> Release **0.5 (beta)**: everything in 0.1 plus BGP, OSPF, MAC, VLAN, VRF, port-channel, STP, HSRP/VRRP,
+> NTP, hardware and running-config tables, SSH host key pinning, intent checks, pre/post change verification, a topology map and reports. Verified against
 > captured mock data; not yet run against live devices. See [Roadmap](#roadmap).
 
 ## What it does
@@ -24,7 +24,7 @@ dependency on any external source of truth or orchestrator.
 | Inventory | Devices, sites, tags, roles, status (active / maintenance / retired); CSV import with dry run; CSV export |
 | Credentials | Credential profiles, envelope-encrypted (AES-256-GCM, master key outside the DB); resolved device → site → `default`; write-only over the API |
 | Collection | SSH via pyATS/Unicon, parsing with Genie; one job per device on a Redis queue; per-device lock; jitter; partial results kept when a parser fails |
-| Data collected | Facts, interfaces, IPv4 routes (all VRFs on NX-OS), ARP, CDP and LLDP neighbors; **0.5:** BGP sessions (all VRFs and address families), OSPF neighbors, MAC table, VLANs, VRFs, hardware inventory, running configuration |
+| Data collected | Facts, interfaces, IPv4 routes (all VRFs on NX-OS), ARP, CDP and LLDP neighbors; **0.5:** BGP sessions (all VRFs and address families), OSPF neighbors, MAC table, VLANs, VRFs, port-channels (LACP members, bundled or not), spanning tree (root and port roles per VLAN/MST instance), HSRP and VRRP groups, NTP peers and sync, hardware inventory, running configuration |
 | Snapshots | On demand (API, CLI, UI) or on a cron schedule; labels (e.g. `change:CHG0012345`); per-device status; raw CLI text and full Genie output kept in S3 object storage |
 | Diff | Keyed diff per table: added / removed / changed with the fields that changed; volatile fields (counters, ages, uptime) ignored; failed devices reported as *unknown*, not as removed; time windows (`24h`, ISO times, `previous`, `latest`) |
 | History | Change timeline per device |
@@ -38,9 +38,10 @@ New in 0.5:
 | Area | What it does |
 |---|---|
 | Config | Running config is stored with secrets masked (`secret`, `password`, `key`, SNMP communities, pre-shared keys become `<removed>`) **before** it is written anywhere. Volatile lines (timestamps, "Last configuration change") are dropped. Config is split into sections, so a diff says which section changed, and a unified diff is available per device |
-| Intent checks | Every snapshot is graded on completion. 10 built-in state rules (BGP established, OSPF full, enabled interfaces up, MTU and duplex match on both ends of a link, no HTTP server, NTP, SSH v2, AAA, collection succeeded) and 5 delta rules for change verification. Custom rules in YAML or JSON: `row` (filter + assert on any table field), `config_require`, `config_forbid`, with scope by platform, site, role or device. Built-ins can be disabled; rules can be tested before saving |
-| Change verification | Pre/post compare by snapshot or by change label. Fails when a BGP session, OSPF adjacency or interface is lost, routes per VRF drop beyond a threshold, a device was not collected after, or a state check newly fails. CLI exits 5 on failure for pipelines |
+| Intent checks | Every snapshot is graded on completion. 14 built-in state rules (BGP established, OSPF full, enabled interfaces up, MTU and duplex match on both ends of a link, port-channels up with all members bundled, NTP synchronized, HSRP/VRRP healthy with a standby, no HTTP server, NTP configured, SSH v2, AAA, collection succeeded) and 8 delta rules for change verification. Custom rules in YAML or JSON: `row` (filter + assert on any table field), `config_require`, `config_forbid`, with scope by platform, site, role or device. Built-ins can be disabled; rules can be tested before saving |
+| Change verification | Pre/post compare by snapshot or by change label. Fails when a BGP session, OSPF adjacency, interface or port-channel member is lost, a spanning-tree root moves, routes per VRF drop beyond a threshold, a device was not collected after, or a state check newly fails. CLI exits 5 on failure for pipelines |
 | Topology | Map from CDP and LLDP, managed and discovered nodes coloured by check results, links added or removed since any earlier snapshot |
+| SSH host keys | Each device's SSH host key is pinned on first contact (or must be pinned in advance in strict mode). A changed key fails the collection before any credentials are sent, and is audited. The session that logs in is bound to the pinned key through a one-off known_hosts file |
 | Reports | Change, compliance and inventory reports as printable HTML (save as PDF), Excel and CSV, from the UI, API or CLI |
 
 ## Quick start (Docker Compose, single server)
@@ -139,13 +140,14 @@ Authenticate with `Authorization: Bearer <token>`: create a token under Settings
 | `GET /topology?compare=&site=` | Nodes and links, with link changes |
 | `GET /diffs/config?device=&from=&to=`, `GET /devices/{name}/config` | Config diff and masked config |
 | `GET /reports/{changes,compliance,inventory}?format=html\|csv\|xlsx` | Reports |
+| `PATCH /devices/{name}` with `ssh_host_key`, `DELETE /devices/{name}/host-key` | Pin an SSH host key by hand, or forget the pin (admin) |
 | `GET/POST /schedules`, `PATCH/DELETE /schedules/{name}` | Cron schedules (UTC) |
 | `POST /auth/login`, `/auth/logout`, `GET /auth/me`, `GET/POST/DELETE /auth/tokens` | Sessions and API tokens |
 | `GET/POST /users`, `PATCH /users/{name}` | Users (admin) |
 | `GET /audit` | Audit log (admin) |
 
 Tables: `facts`, `interfaces`, `routes`, `arp`, `neighbors`, `bgp`, `ospf`, `mac`, `vlans`, `vrfs`,
-`hardware`, `config`. A diff change looks like
+`hardware`, `portchannels`, `stp`, `fhrp`, `ntp`, `config`. A diff change looks like
 `{device, table, key, change: added|removed|changed, before, after, fields_changed}`.
 
 Webhooks: when `callback_url` is given, a `snapshot.finished` event is POSTed when the snapshot
@@ -167,6 +169,7 @@ All settings are environment variables (or `.env`), prefixed `ASSURANCE_`.
 | `COLLECTOR` | `live` | `live` (SSH) or `mock` (reads `MOCK_ROOT`) |
 | `COLLECT_TIMEOUT` | `60` | Seconds per command |
 | `COLLECT_JITTER_SECONDS` | `2` | Random delay before each device connects |
+| `SSH_HOST_KEY_POLICY` | `tofu` | `tofu` pins on first contact, `strict` requires a pin, `off` disables checking |
 | `SESSION_HOURS`, `MAX_FAILED_LOGINS`, `LOCKOUT_MINUTES` | `12`, `5`, `15` | |
 | `BOOTSTRAP_ADMIN_PASSWORD` | | Creates user `admin` on the first `migrate` when no user exists |
 | `WEBHOOK_SECRET` | | HMAC key for webhook signatures |
@@ -215,6 +218,9 @@ Run the API locally with `uvicorn --factory assurance.api.app:create_app --reloa
 - API tokens and session tokens are 256-bit random values stored as SHA-256 hashes. Passwords use Argon2.
 - Every change to inventory, credentials, schedules, users and tokens, and every snapshot request, is audited.
 - The UI is served with a strict Content Security Policy, `X-Frame-Options: DENY` and `nosniff`.
+- SSH host keys are pinned per device (`ASSURANCE_SSH_HOST_KEY_POLICY`: `tofu` default, `strict`, `off`).
+  A changed key stops collection for that device until an admin resets the pin.
+- Secrets are masked in every collected output (not only the running config) before parsing or storage.
 - Use a dedicated read-only device account (TACACS+ command authorization or a low privilege level).
 - Put TLS in front of the API (reverse proxy or load balancer) in any shared environment.
 
@@ -222,11 +228,11 @@ Run the API locally with `uvicorn --factory assurance.api.app:create_app --reloa
 
 From the architecture doc's release plan:
 
-- **0.5 beta (this release):** BGP, OSPF, MAC, VLANs, VRFs, hardware, configs, intent checks,
-  topology, pre/post verification, reports. Still to do for 0.5: port-channels, STP, HSRP/VRRP, NTP
-  tables, check profiles per change type, SSH host key pinning.
+- **0.5 beta (this release):** BGP, OSPF, MAC, VLANs, VRFs, port-channels, STP, HSRP/VRRP, NTP,
+  hardware, configs, intent checks, topology, pre/post verification, reports, SSH host key pinning.
+  Still to do: check profiles per change type (which rules a given change must pass).
 - **1.0 GA:** HA deployment (Helm), OIDC SSO, backup/restore, OpenTelemetry tracing, hardening and pen test.
 
 Known gaps: the live collector has not been run against real devices yet (mock data only); IOS-XE
 collects the global routing table only (no per-VRF commands yet); no IPv6; no reachability check
-when a device is added; no rate limiting on the API; the topology map is one level (no site grouping).
+when a device is added; no rate limiting on the API; no VRRP on NX-OS (Genie has no parser for it); the topology map is one level (no site grouping).

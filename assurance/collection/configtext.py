@@ -21,6 +21,11 @@ _SECRET_RULES = [
     (re.compile(r"(?i)\b(snmp-server community)\s+\S+"), rf"\1 {MASK}"),
     (re.compile(r"(?i)\b(snmp-server user\s+\S+\s+.*?\bauth)\b.*$"), rf"\1 {MASK}"),
     (re.compile(r"(?i)\b(pre-shared-key)(\s+\S+)?\s+\S+"), rf"\1\2 {MASK}"),
+    # HSRP/VRRP/OSPF authentication strings, in config and in show output ("Authentication text ...")
+    (re.compile(r"(?i)\b(authentication text|authentication-key(\s+\d)?)\s+(\"[^\"]*\"|\S+)"), rf"\1 {MASK}"),
+    # "standby 1 authentication cisco": a bare value ending the line, but not a mode keyword
+    (re.compile(r"(?i)\b(authentication)\s+(?!(message-digest|null|key-chain|md5|mode|ipsec)\b)\S+\s*$"),
+     rf"\1 {MASK}"),
 ]
 
 # Lines that change on every collection without a real change.

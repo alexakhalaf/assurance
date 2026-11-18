@@ -204,6 +204,7 @@ def normalize(genie: dict[str, dict]) -> dict:
         "arp": arp(genie.get("arp"), interface_vrfs(r)),
         "neighbors": {**cdp(genie.get("cdp")), **lldp(genie.get("lldp"))},
         **{t: fn(genie.get(t)) for t, fn in TECH_NORMALIZERS.items()},
+        "fhrp": {**hsrp(genie.get("hsrp")), **vrrp(genie.get("vrrp"))},
     }
 
 
@@ -354,4 +355,132 @@ def hardware(g: dict) -> dict:
     return out
 
 
-TECH_NORMALIZERS = {"bgp": bgp, "ospf": ospf, "mac": mac, "vlans": vlans, "vrfs": vrfs, "hardware": hardware}
+# ------------------------------------------------------------- port-channels
+
+
+def portchannels(g: dict) -> dict:
+    """One row per port-channel: protocol, status, all members and the bundled ones.
+
+    IOS-XE marks bundled members with flag P (or bundled: true); NX-OS uses P as well.
+    """
+    out = {}
+    for name, p in (g or {}).get("interfaces", {}).items():
+        members = {expand_ifname(m): v for m, v in (p.get("members") or {}).items()}
+        bundled = sorted(m for m, v in members.items() if v.get("bundled") or "P" in (v.get("flags") or ""))
+        flags = p.get("flags") or ""
+        layer = p.get("layer") or ("routed" if "R" in flags else "switched" if "S" in flags else None)
+        out[expand_ifname(name)] = {
+            "name": expand_ifname(name),
+            "protocol": (p.get("protocol") or "none").lower(),
+            "oper_status": (p.get("oper_status") or "unknown").lower(),
+            "layer": layer,
+            "members": sorted(members),
+            "members_bundled": bundled,
+            "members_down": sorted(set(members) - set(bundled)),
+        }
+    return out
+
+
+# ---------------------------------------------------------------------- stp
+
+
+def stp(g: dict) -> dict:
+    """One row per spanning-tree instance (VLAN or MST instance) with the root and port roles.
+
+    Topology change counters and timers are volatile and left out.
+    """
+    out = {}
+    for mode, m in (g or {}).items():
+        if not isinstance(m, dict):
+            continue
+        instances = m.get("vlans") or m.get("mst_instances") or {}
+        for inst_id, i in instances.items():
+            ports = {expand_ifname(n): (p.get("status") or p.get("role") or "unknown").lower()
+                     for n, p in (i.get("interfaces") or {}).items()}
+            is_root = bool(i.get("root_of_the_spanning_tree"))
+            root_addr = root_pri = None
+            for p in (i.get("interfaces") or {}).values():
+                root_addr = p.get("designated_root_address") or root_addr
+                root_pri = p.get("designated_root_priority") or root_pri
+            if is_root:
+                root_addr = i.get("bridge_address")
+                root_pri = (i.get("bridge_priority") or 0) + (i.get("bridge_sysid") or 0)
+            root_port = next((n for n, r in ports.items() if r == "root"), None)
+            key = f"{'mst' if 'mst_instances' in m else 'vlan'}{inst_id}"
+            out[key] = {
+                "mode": mode,
+                "instance": str(inst_id),
+                "bridge_priority": i.get("bridge_priority"),
+                "bridge_address": normalize_mac(i.get("bridge_address")) if i.get("bridge_address") else None,
+                "is_root": is_root,
+                "root_address": normalize_mac(root_addr) if root_addr else None,
+                "root_priority": root_pri,
+                "root_port": root_port,
+                "ports": ports,
+            }
+    return out
+
+
+# --------------------------------------------------------------------- fhrp
+
+
+def hsrp(g: dict) -> dict:
+    out = {}
+    for ifname, i in (g or {}).items():
+        if not isinstance(i, dict):
+            continue
+        for af, a in (i.get("address_family") or {}).items():
+            for ver, v in (a.get("version") or {}).items():
+                for grp, x in (v.get("groups") or {}).items():
+                    vip = (x.get("primary_ipv4_address") or {}).get("address")
+                    if not vip and x.get("link_local_ipv6_address"):
+                        vip = x["link_local_ipv6_address"].get("address")
+                    ifn = expand_ifname(ifname)
+                    out[f"{ifn}|hsrp|{grp}"] = {
+                        "interface": ifn, "protocol": "hsrp", "group": int(grp), "version": int(ver),
+                        "address_family": af, "state": (x.get("hsrp_router_state") or "unknown").lower(),
+                        "priority": x.get("priority") or x.get("configured_priority"),
+                        "preempt": bool(x.get("preempt")), "virtual_ip": vip,
+                        "active_router": x.get("active_router"), "standby_router": x.get("standby_router"),
+                    }
+    return out
+
+
+def vrrp(g: dict) -> dict:
+    out = {}
+    for ifname, i in ((g or {}).get("interface") or {}).items():
+        for grp, x in (i.get("group") or {}).items():
+            ifn = expand_ifname(ifname)
+            state = (x.get("state") or "unknown").lower()
+            out[f"{ifn}|vrrp|{grp}"] = {
+                "interface": ifn, "protocol": "vrrp", "group": int(grp), "version": None, "address_family": "ipv4",
+                "state": state, "priority": x.get("priority"), "preempt": bool(x.get("preemption") == "enabled"
+                                                                              or x.get("preempt")),
+                "virtual_ip": x.get("virtual_ip_address"), "active_router": x.get("master_router_ip"),
+                "standby_router": None,
+            }
+    return out
+
+
+# ---------------------------------------------------------------------- ntp
+
+
+def ntp(g: dict) -> dict:
+    """One row per NTP peer. Delay, offset, reach and poll timers are volatile and left out."""
+    out = {}
+    g = g or {}
+    for peer, p in (g.get("peer") or {}).items():  # IOS-XE
+        for mode in (p.get("local_mode") or {}).values():
+            out[peer] = {"peer": peer, "vrf": mode.get("vrf") or "default", "stratum": mode.get("stratum"),
+                         "mode": (mode.get("mode") or "unknown").lower(), "configured": bool(mode.get("configured")),
+                         "synchronized": mode.get("mode") == "synchronized"}
+    for vrf, v in (g.get("vrf") or {}).items():  # NX-OS
+        for peer, p in (v.get("peer") or {}).items():
+            out[peer] = {"peer": peer, "vrf": vrf, "stratum": p.get("stratum"),
+                         "mode": (p.get("mode") or "unknown").lower(), "configured": True,
+                         "synchronized": p.get("mode") == "synchronized"}
+    return out
+
+
+TECH_NORMALIZERS = {"bgp": bgp, "ospf": ospf, "mac": mac, "vlans": vlans, "vrfs": vrfs, "hardware": hardware,
+                    "portchannels": portchannels, "stp": stp, "ntp": ntp}

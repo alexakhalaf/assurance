@@ -28,6 +28,12 @@ export default function DevicePage() {
     nav("/devices");
   }
 
+  async function resetKey() {
+    if (!confirm(`Forget the pinned SSH host key for ${name}? The next collection pins whatever key the device presents, so check the new fingerprint afterwards.`)) return;
+    await api(`/devices/${name}/host-key`, { method: "DELETE" });
+    dev.reload();
+  }
+
   if (dev.error) return <ErrorNote error={dev.error} />;
   if (!d) return <div className="muted">Loading…</div>;
   return (
@@ -45,6 +51,11 @@ export default function DevicePage() {
             <dt>Credential</dt><dd>{d.credential || "inherited"}</dd>
             <dt>Last collection</dt><dd>{d.last_collection_status ? <><Badge status={d.last_collection_status} /> {fmtTime(d.last_collected_at)}</> : "never"}</dd>
             <dt>Tags</dt><dd>{d.tags.map((t) => <span className="tag" key={t}>{t}</span>)}</dd>
+            <dt>SSH host key</dt><dd>{d.ssh_host_key_fingerprint
+              ? <><span className="mono">{d.ssh_host_key_type} {d.ssh_host_key_fingerprint}</span>
+                <div className="muted">pinned {fmtTime(d.ssh_host_key_pinned_at)}
+                  {can("admin") && <> · <button className="btn sm ghost" onClick={resetKey}>Reset pin</button></>}</div></>
+              : <span className="muted">not pinned yet (pinned on first collection)</span>}</dd>
           </dl>
         </Card>
         <Card title="Change history" actions={

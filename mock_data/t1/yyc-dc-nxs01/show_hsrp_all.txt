@@ -1,0 +1,15 @@
+
+Vlan100 - Group 10 (HSRP-V2) (IPv4)
+  Local state is Active, priority 110 (Cfged 110), may preempt
+    Forwarding threshold(for vPC), lower: 1 upper: 110
+  Preemption Delay (Seconds) Reload:10
+  Hellotime 1 sec, holdtime 3 sec
+  Next hello sent in 0.384000 sec(s)
+  Virtual IP address is 10.20.100.1 (Cfged)
+  Active router is local
+  Standby router is 10.20.100.3 , priority 100 expires in 2.795000 sec(s)
+  Authentication text "cisco"
+  Virtual mac address is 0000.0c9f.f00a (Default MAC)
+  2 state changes, last state change 5w0d
+  IP redundancy name is hsrp-Vlan100-10 (default)
+

@@ -150,6 +150,8 @@ function brief(table: string, v: Record<string, any>) {
     routes: ["protocol", "next_hops"], arp: ["mac", "interface"], neighbors: ["remote_device", "remote_interface"],
     bgp: ["remote_as", "state", "prefixes_received"], ospf: ["address", "state"], mac: ["interfaces"],
     vlans: ["name", "state"], vrfs: ["rd", "state"], hardware: ["pid", "serial"],
+    portchannels: ["oper_status", "members_bundled"], stp: ["root_address", "root_port"],
+    fhrp: ["state", "virtual_ip"], ntp: ["mode", "stratum"],
   };
   return (keep[table] || []).map((k) => `${k.replace(/_/g, " ")}: ${short(v[k])}`).join(" · ");
 }

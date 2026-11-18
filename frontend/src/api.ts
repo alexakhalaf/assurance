@@ -87,7 +87,8 @@ export interface Device {
   id: number; name: string; host: string; platform: string; port: number; site: string | null;
   role: string | null; tags: string[]; status: string; credential: string | null; hostname: string | null;
   model: string | null; serial: string | null; os_version: string | null; last_collected_at: string | null;
-  last_collection_status: string | null;
+  last_collection_status: string | null; ssh_host_key_type: string | null; ssh_host_key_fingerprint: string | null;
+  ssh_host_key_pinned_at: string | null;
 }
 export interface Snapshot {
   id: string; status: string; trigger: string; requested_by: string | null; scope: Record<string, unknown>;
@@ -107,6 +108,6 @@ export interface Diff {
   summary: any; changes: Change[]; total: number;
 }
 export const TABLES = ["facts", "interfaces", "routes", "arp", "neighbors", "bgp", "ospf", "mac", "vlans", "vrfs",
-  "hardware", "config"] as const;
+  "hardware", "portchannels", "stp", "fhrp", "ntp", "config"] as const;
 export interface CheckSummary { status: string; severity: string; violations: number; }
 export interface Violation { rule?: string; device: string; key: string; message: string; severity?: string; data?: any; }

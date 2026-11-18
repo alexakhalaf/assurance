@@ -5,8 +5,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response,
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from ...collection import hostkeys
 from ...db import get_db
-from ...models import CredentialProfile, Device, Site
+from ...models import CredentialProfile, Device, Site, utcnow
 from ...services import audit
 from ...services import credentials as cred_svc
 from ...services.inventory import export_csv, import_devices
@@ -50,7 +51,10 @@ def _site(db: Session, name: str | None, create: bool = False) -> Site | None:
 
 
 def device_out(d: Device) -> DeviceOut:
-    return DeviceOut.model_validate(d)
+    out = DeviceOut.model_validate(d)
+    if d.ssh_host_key:
+        out.ssh_host_key_fingerprint = hostkeys.fingerprint(d.ssh_host_key)
+    return out
 
 
 # ------------------------------------------------------------------ sites
@@ -198,9 +202,39 @@ def update_device(name: str, body: DevicePatch, request: Request, p: Principal =
         d.credential = _cred(db, data.pop("credential"))
     if "tags" in data:
         data["tags"] = sorted({t.strip() for t in data["tags"] or [] if t.strip()})
+    if "ssh_host_key" in data:
+        text = data.pop("ssh_host_key")
+        if text:
+            try:
+                k = hostkeys.parse_key(text)
+            except ValueError as e:
+                raise HTTPException(422, str(e)) from e
+            d.ssh_host_key_type, d.ssh_host_key, d.ssh_host_key_pinned_at = k.key_type, k.key, utcnow()
+            audit.record(db, p.name, "device.hostkey.pin", name, {"type": k.key_type, "fingerprint": k.fingerprint},
+                         client_ip(request))
+        else:
+            _clear_pin(db, d, p, request)
     for k, v in data.items():
         setattr(d, k, v)
     audit.record(db, p.name, "device.update", name, {"fields": sorted(body.model_fields_set)}, client_ip(request))
+    db.commit()
+    return device_out(d)
+
+
+def _clear_pin(db: Session, d: Device, p: Principal, request: Request) -> None:
+    old = hostkeys.fingerprint(d.ssh_host_key) if d.ssh_host_key else None
+    d.ssh_host_key_type = d.ssh_host_key = d.ssh_host_key_pinned_at = None
+    audit.record(db, p.name, "device.hostkey.reset", d.name, {"previous": old}, client_ip(request))
+
+
+@router.delete("/devices/{name}/host-key", response_model=DeviceOut, tags=["inventory"])
+def reset_host_key(name: str, request: Request, p: Principal = Depends(admin), db: Session = Depends(get_db)):
+    """Forget the pinned SSH host key, e.g. after a device was replaced. In tofu mode the next
+    collection pins whatever key the device presents, so confirm the new fingerprint out of band."""
+    d = db.scalar(select(Device).where(Device.name == name))
+    if d is None:
+        raise HTTPException(404, "Device not found")
+    _clear_pin(db, d, p, request)
     db.commit()
     return device_out(d)
 

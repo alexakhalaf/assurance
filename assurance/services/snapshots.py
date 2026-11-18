@@ -18,6 +18,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from .. import jobs, metrics
+from ..collection import hostkeys
 from ..collection.collectors import LiveCollector, MockCollector
 from ..collection.commands import COMMANDS, all_commands
 from ..collection.pipeline import parse_device, sanitize_raw
@@ -35,6 +36,7 @@ from ..models import (
     utcnow,
 )
 from ..storage import put_text
+from . import audit
 from . import credentials as cred_svc
 from .diff import DIFFABLE, diff_snapshots, row_hash
 from .inventory import resolve_scope
@@ -89,7 +91,31 @@ def _collector_for(snap: Snapshot, device: Device, db: Session):
                            "or create a profile named 'default')")
     if s.collect_jitter_seconds:
         time.sleep(random.uniform(0, s.collect_jitter_seconds))
-    return LiveCollector(cred_svc.decrypt(profile), timeout=s.collect_timeout)
+    return LiveCollector(cred_svc.decrypt(profile), timeout=s.collect_timeout, host_key=_verify_host_key(db, device))
+
+
+def _verify_host_key(db: Session, device: Device) -> hostkeys.HostKey | None:
+    """Checks the device's SSH host key against the pin (and pins it on first contact in tofu mode).
+
+    Returns the key the SSH session must present, or None when pinning is off or not SSH.
+    """
+    policy = get_settings().ssh_host_key_policy
+    if policy == "off" or device.protocol != "ssh":
+        return None
+    pinned = hostkeys.HostKey(device.ssh_host_key_type, device.ssh_host_key) if device.ssh_host_key else None
+    try:
+        presented = hostkeys.fetch(device.host, device.port, timeout=min(get_settings().collect_timeout, 20))
+    except Exception as e:
+        raise RuntimeError(f"SSH key exchange with {device.host}:{device.port} failed: {e}") from e
+    new_pin = hostkeys.check(pinned, presented, policy)
+    if new_pin:
+        device.ssh_host_key_type, device.ssh_host_key = new_pin.key_type, new_pin.key
+        device.ssh_host_key_pinned_at = utcnow()
+        audit.record(db, "system", "device.hostkey.pin", device.name,
+                     {"type": new_pin.key_type, "fingerprint": new_pin.fingerprint, "policy": policy})
+        log.info("pinned SSH host key for %s: %s %s", device.name, new_pin.key_type, new_pin.fingerprint)
+        return new_pin
+    return pinned
 
 
 def run_device_collection(collection_id: int) -> None:
@@ -152,6 +178,9 @@ def run_device_collection(collection_id: int) -> None:
     except Exception as e:
         log.warning("collection failed for %s: %s", device_name, e,
                     extra={"snapshot_id": snapshot_id, "device": device_name})
+        if isinstance(e, hostkeys.HostKeyError):
+            with session_scope() as db:
+                audit.record(db, "system", "device.hostkey.mismatch", device_name, {"error": str(e)[:500]})
         with session_scope() as db:
             dc = db.get(DeviceCollection, collection_id)
             dc.status, dc.error = CollectionStatus.failed, _scrub(str(e))[:2000]

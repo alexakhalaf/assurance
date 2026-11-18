@@ -20,6 +20,11 @@ COMMANDS = {
         "vlans": "show vlan",
         "vrfs": "show vrf",
         "hardware": "show inventory",
+        "portchannels": "show etherchannel summary",
+        "stp": "show spanning-tree detail",
+        "hsrp": "show standby all",
+        "vrrp": "show vrrp",
+        "ntp": "show ntp associations",
     },
     NX_OS: {
         "version": "show version",
@@ -34,6 +39,11 @@ COMMANDS = {
         "vlans": "show vlan",
         "vrfs": "show vrf",
         "hardware": "show inventory",
+        "portchannels": "show port-channel summary",
+        "stp": "show spanning-tree detail",
+        "hsrp": "show hsrp all",
+        "ntp": "show ntp peer-status",
+        # No Genie parser for NX-OS VRRP yet; VRRP rows come from IOS-XE only.
     },
 }
 

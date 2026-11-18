@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     mock_root: Path = Path("./mock_data")
     collect_timeout: int = 60
     collect_jitter_seconds: float = 2.0
+    # SSH host key pinning: tofu = pin on first contact, strict = must be pinned beforehand, off = no check
+    ssh_host_key_policy: Literal["tofu", "strict", "off"] = "tofu"
 
     # API auth
     session_hours: int = 12

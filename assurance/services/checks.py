@@ -168,6 +168,35 @@ def _collection_ok(s: SnapshotData, **_):
             yield Violation(d, "collection", f"collection was {meta.get('status')}", {"status": meta.get("status")})
 
 
+def _portchannel_up(s: SnapshotData, **_):
+    for d, k, r in s.rows("portchannels"):
+        if r.get("oper_status") != "up":
+            yield Violation(d, k, f"{k} is {r.get('oper_status')}", r)
+
+
+def _portchannel_members(s: SnapshotData, **_):
+    for d, k, r in s.rows("portchannels"):
+        if r.get("members_down"):
+            yield Violation(d, k, f"{k}: member(s) not bundled: {', '.join(r['members_down'])}", r)
+
+
+def _ntp_synchronized(s: SnapshotData, **_):
+    for d in sorted(s.collected):
+        peers = s.table("ntp", d)
+        if peers and not any(p.get("synchronized") for p in peers.values()):
+            yield Violation(d, "ntp", f"not synchronized to any of {len(peers)} NTP peer(s)",
+                            {"peers": sorted(peers)})
+
+
+def _fhrp_redundant(s: SnapshotData, **_):
+    for d, k, r in s.rows("fhrp"):
+        if r.get("state") not in ("active", "standby", "master", "backup"):
+            yield Violation(d, k, f"{r['protocol'].upper()} group {r['group']} on {r['interface']} "
+                                  f"is {r.get('state')}", r)
+        elif r.get("protocol") == "hsrp" and not r.get("standby_router"):
+            yield Violation(d, k, f"HSRP group {r['group']} on {r['interface']} has no standby router", r)
+
+
 # ---- delta rules (pre -> post)
 
 
@@ -206,6 +235,37 @@ def _neighbor_lost(s: SnapshotData, prev: SnapshotData, **_):
         if d in s.collected and k not in s.table("neighbors", d):
             yield Violation(d, k, f"{r['protocol'].upper()} neighbor {r['remote_device']} on "
                                   f"{r['local_interface']} disappeared", r)
+
+
+def _stp_root_changed(s: SnapshotData, prev: SnapshotData, **_):
+    for d, k, r in prev.rows("stp"):
+        if d not in s.collected:
+            continue
+        now = s.table("stp", d).get(k)
+        if now and now.get("root_address") != r.get("root_address"):
+            yield Violation(d, k, f"spanning-tree root for {k} moved from {r.get('root_address')} "
+                                  f"to {now.get('root_address')}", {"before": r, "after": now})
+
+
+def _fhrp_state_changed(s: SnapshotData, prev: SnapshotData, **_):
+    for d, k, r in prev.rows("fhrp"):
+        if d not in s.collected:
+            continue
+        now = s.table("fhrp", d).get(k)
+        if now is None or now.get("state") != r.get("state"):
+            yield Violation(d, k, f"{r['protocol'].upper()} group {r['group']} on {r['interface']} went from "
+                                  f"{r.get('state')} to {now.get('state') if now else 'gone'}",
+                            {"before": r, "after": now})
+
+
+def _portchannel_member_lost(s: SnapshotData, prev: SnapshotData, **_):
+    for d, k, r in prev.rows("portchannels"):
+        if d not in s.collected:
+            continue
+        now = s.table("portchannels", d).get(k) or {}
+        lost = sorted(set(r.get("members_bundled") or []) - set(now.get("members_bundled") or []))
+        if lost:
+            yield Violation(d, k, f"{k} lost bundled member(s): {', '.join(lost)}", {"before": r, "after": now or None})
 
 
 def _route_count_drop(s: SnapshotData, prev: SnapshotData, threshold_pct: float = 2.0, **_):
@@ -250,6 +310,16 @@ BUILTIN: list[Rule] = [
          WARNING, "state", ("config",), _config_require(r"^(aaa new-model|feature tacacs\+)$", "AAA (TACACS+)")),
     Rule("collection-ok", "Collection succeeded", "Every device in scope was collected without errors.",
          WARNING, "state", (), _collection_ok),
+    Rule("portchannel-up", "Port-channels up", "Every port-channel is operationally up.",
+         FAIL, "state", ("portchannels",), _portchannel_up),
+    Rule("portchannel-members-bundled", "Port-channel members bundled",
+         "Every configured member of a port-channel is bundled.", WARNING, "state", ("portchannels",),
+         _portchannel_members),
+    Rule("ntp-synchronized", "NTP synchronized", "Devices with NTP peers are synchronized to one of them.",
+         FAIL, "state", ("ntp",), _ntp_synchronized),
+    Rule("fhrp-redundant", "Gateway redundancy healthy",
+         "HSRP/VRRP groups are active or standby, and HSRP groups have a standby router.",
+         WARNING, "state", ("fhrp",), _fhrp_redundant),
     # delta rules
     Rule("bgp-neighbor-lost", "No BGP session lost", "No BGP neighbor that was Established is down or gone.",
          FAIL, "delta", ("bgp",), _bgp_lost),
@@ -261,6 +331,12 @@ BUILTIN: list[Rule] = [
          FAIL, "delta", ("routes",), _route_count_drop),
     Rule("neighbor-lost", "No CDP/LLDP neighbor lost", "No CDP or LLDP neighbor disappeared.",
          WARNING, "delta", ("neighbors",), _neighbor_lost),
+    Rule("stp-root-changed", "Spanning-tree root unchanged", "No VLAN or MST instance has a new root bridge.",
+         FAIL, "delta", ("stp",), _stp_root_changed),
+    Rule("fhrp-state-changed", "Gateway roles unchanged", "No HSRP/VRRP group changed state (e.g. active to standby).",
+         WARNING, "delta", ("fhrp",), _fhrp_state_changed),
+    Rule("portchannel-member-lost", "No port-channel member lost", "No bundled port-channel member left its bundle.",
+         FAIL, "delta", ("portchannels",), _portchannel_member_lost),
 ]
 BUILTIN_BY_ID = {r.id: r for r in BUILTIN}
 

@@ -57,7 +57,7 @@ def test_snapshot_is_graded(client, two_snapshots, view_h):
     res = client.get(f"{API}/snapshots/latest/checks", params={"rule": "link-mtu-mismatch"}, headers=view_h).json()
     assert len(res["violations"]) == 1 and "9000" in res["violations"][0]["message"]
     lst = client.get(f"{API}/checks/rules", headers=view_h).json()
-    assert len([r for r in lst["rules"] if r["builtin"]]) == 15
+    assert len([r for r in lst["rules"] if r["builtin"]]) == 22
     trend = client.get(f"{API}/checks/trend", headers=view_h).json()
     assert len(trend) == 2 and trend[-1]["fail"] >= 1
 
@@ -142,3 +142,37 @@ def test_reports(client, two_snapshots, view_h):
     assert "link-mtu-mismatch" in comp.text
     inv = client.get(f"{API}/reports/inventory", headers=view_h)
     assert "N9K-C9300v" in inv.text and "9ABCDEF1234" in inv.text
+
+
+def test_l2_fhrp_ntp_tables(client, two_snapshots, view_h):
+    t = lambda table, **p: client.get(f"{API}/snapshots/latest/tables/{table}", params=p, headers=view_h).json()  # noqa: E731
+    pc = {r["key"]: r for r in t("portchannels", device="yyc-dc-nxs01")["items"]}
+    assert pc["Port-channel20"]["members_down"] == ["Ethernet1/8"]
+    assert pc["Port-channel10"]["protocol"] == "lacp"
+    stp = {r["key"]: r for r in t("stp")["items"]}
+    assert stp["vlan100"]["is_root"] and stp["vlan200"]["root_port"] == "Port-channel10"
+    assert stp["vlan200"]["root_address"] == "52:54:00:ab:cd:ef"
+    assert t("stp", device="yyc-core-rtr01")["total"] == 0  # router: "No spanning tree instance exists"
+    fhrp = {r["key"]: r for r in t("fhrp")["items"]}
+    assert fhrp["Vlan100|hsrp|10"]["state"] == "standby" and fhrp["GigabitEthernet2|hsrp|1"]["state"] == "active"
+    ntp = {(r["device"], r["key"]): r for r in t("ntp")["items"]}
+    assert not ntp[("yyc-core-rtr01", "10.0.0.1")]["synchronized"]
+    assert ntp[("yyc-dc-nxs01", "10.0.0.1")]["vrf"] == "management"
+    # HSRP authentication text from show output is masked before storage
+    raw = client.get(f"{API}/snapshots/latest/raw/yyc-dc-nxs01/show_hsrp_all", headers=view_h).text
+    assert '"cisco"' not in raw and "Authentication text <removed>" in raw
+
+
+def test_l2_checks(client, two_snapshots, view_h):
+    snap = client.get(f"{API}/snapshots/latest", headers=view_h).json()
+    rules = snap["summary"]["checks"]["rules"]
+    assert rules["ntp-synchronized"]["status"] == "fail"
+    assert rules["portchannel-members-bundled"]["status"] == "warning"
+    assert rules["portchannel-up"]["status"] == "pass"
+    assert rules["fhrp-redundant"]["status"] == "pass"
+    r = client.post(f"{API}/compare/prepost", json={"pre": two_snapshots[0], "post": two_snapshots[1]},
+                    headers=view_h).json()["checks"]
+    assert [v["key"] for v in r["portchannel-member-lost"]["violations"]] == ["Port-channel20"]
+    assert [v["key"] for v in r["fhrp-state-changed"]["violations"]] == ["Vlan100|hsrp|10"]
+    assert r["stp-root-changed"]["status"] == "pass"
+    assert "new:ntp-synchronized" in r

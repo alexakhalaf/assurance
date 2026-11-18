@@ -181,6 +181,8 @@ class DevicePatch(BaseModel):
     tags: list[str] | None = None
     status: DeviceStatus | None = None
     credential: str | None = None
+    ssh_host_key: str | None = Field(default=None, max_length=8192,
+                                     description="Pin a host key: 'ssh-ed25519 AAAA...' (ssh-keyscan output works)")
 
     @field_validator("host")
     @classmethod
@@ -211,6 +213,9 @@ class DeviceOut(ORM):
     os_version: str | None
     last_collected_at: datetime | None
     last_collection_status: str | None
+    ssh_host_key_type: str | None = None
+    ssh_host_key_fingerprint: str | None = None
+    ssh_host_key_pinned_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 

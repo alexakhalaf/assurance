@@ -165,6 +165,10 @@ class Device(Base):
     os_version: Mapped[str | None] = mapped_column(String(64))
     last_collected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_collection_status: Mapped[str | None] = mapped_column(String(16))
+    # Pinned SSH host key (public key, not a secret): type and base64 blob.
+    ssh_host_key_type: Mapped[str | None] = mapped_column(String(32))
+    ssh_host_key: Mapped[str | None] = mapped_column(Text)
+    ssh_host_key_pinned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
