@@ -86,6 +86,9 @@ ip ssh version 2
 !
 snmp-server community Wj3tN0c-r0 RO 10
 snmp-server location YYC-DC1 Row 4 Rack 12
+snmp-server contact noc@example.net
+snmp-server host 10.250.0.30 version 2c Wj3tN0c-r0
+snmp-server user nms-poller NMS v3 auth sha AuthPassw0rd priv aes 128 PrivPassw0rd
 tacacs server ISE01
  address ipv4 10.250.0.20
  key 7 13061E010803557878

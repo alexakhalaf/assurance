@@ -57,7 +57,7 @@ def test_snapshot_is_graded(client, two_snapshots, view_h):
     res = client.get(f"{API}/snapshots/latest/checks", params={"rule": "link-mtu-mismatch"}, headers=view_h).json()
     assert len(res["violations"]) == 1 and "9000" in res["violations"][0]["message"]
     lst = client.get(f"{API}/checks/rules", headers=view_h).json()
-    assert len([r for r in lst["rules"] if r["builtin"]]) == 22
+    assert len([r for r in lst["rules"] if r["builtin"]]) == 24
     trend = client.get(f"{API}/checks/trend", headers=view_h).json()
     assert len(trend) == 2 and trend[-1]["fail"] >= 1
 
@@ -204,3 +204,91 @@ def test_check_profiles(client, two_snapshots, admin_h, view_h):
                        headers=view_h).status_code == 404
     assert [p["name"] for p in client.get(f"{API}/checks/profiles", headers=view_h).json()] == ["cosmetic", "routing"]
     assert client.delete(f"{API}/checks/profiles/cosmetic", headers=admin_h).status_code == 204
+
+
+def test_global_search(client, two_snapshots, view_h):
+    s = lambda **p: client.get(f"{API}/search", params=p, headers=view_h).json()  # noqa: E731
+    r = s(q="10.10.0.1")
+    assert r["kind"] == "ip"
+    places = {(h["device"], h["table"], h["key"]) for h in r["hits"]}
+    assert ("yyc-core-rtr01", "interfaces", "Loopback0") in places
+    assert not any("10.10.0.11" in str(h["row"]) and h["table"] == "interfaces" and "10.10.0.1/" not in str(h["row"])
+                   for h in r["hits"])  # 10.10.0.1 must not match 10.10.0.11
+    covering = {(x["device"], x["prefix"]) for x in s(q="172.16.5.9")["routes"]}
+    assert ("yyc-core-rtr01", "172.16.0.0/16") in covering
+    mac = s(q="0050.5601.0f99")
+    assert mac["kind"] == "mac" and {h["table"] for h in mac["hits"]} >= {"mac", "arp"}
+    serial = s(q="9ABCDEF1234")
+    assert {h["device"] for h in serial["hits"]} == {"yyc-core-rtr01"}
+    pfx = s(q="172.16.0.0/16")
+    assert pfx["kind"] == "prefix" and any(x["relation"] == "exact" for x in pfx["routes"])
+    assert client.get(f"{API}/search", params={"q": "x"}, headers=view_h).status_code == 422
+    # history: the old MAC was on Ethernet1/3 in t1 and is gone in t2
+    h = client.get(f"{API}/search/history", params={"q": "00:50:56:01:00:22", "since": "1d"},
+                   headers=view_h).json()
+    seen = [bool(e["places"]) for e in h["snapshots"]]
+    assert seen == [True, False] and h["snapshots"][1]["changed"]
+
+
+def test_config_search(client, two_snapshots, view_h):
+    r = client.get(f"{API}/search/config", params={"pattern": "ntp server"}, headers=view_h).json()
+    assert r["devices"] == ["yyc-core-rtr01", "yyc-dc-nxs01"]
+    r = client.get(f"{API}/search/config", params={"pattern": r"^\s*mtu 9216", "regex": True}, headers=view_h).json()
+    assert {m["section"] for m in r["matches"]} >= {"interface Ethernet1/3"}
+    assert client.get(f"{API}/search/config", params={"pattern": "(", "regex": True},
+                      headers=view_h).status_code == 422
+
+
+def test_discovery(client, two_snapshots, admin_h, view_h):
+    from assurance.services.discovery import guess_platform
+
+    assert guess_platform("cisco N9K-C93180YC-FX") == ("nxos", True)
+    assert guess_platform("cisco C8300-1N1S-6T") == ("iosxe", True)
+    assert guess_platform("VMware ESX Releasebuild-22380479") == (None, False)
+    # The previous snapshot still saw yyc-core-rtr02 over CDP on Gi3
+    c = client.get(f"{API}/discovery/candidates", params={"snapshot": "previous"}, headers=view_h).json()
+    byname = {x["name"]: x for x in c["items"]}
+    assert set(byname) == {"yyc-core-rtr02", "yyc-fw01", "yyc-esx01", "yyc-esx02"}  # managed devices excluded
+    rtr02 = byname["yyc-core-rtr02"]
+    assert rtr02["ready"] and rtr02["host"] == "10.10.0.2" and rtr02["platform"] == "iosxe"
+    assert rtr02["seen_by"][0] == {"device": "yyc-core-rtr01", "interface": "GigabitEthernet3",
+                                   "remote_interface": "GigabitEthernet3", "protocol": "cdp"}
+    assert not byname["yyc-esx01"]["supported"] and not byname["yyc-fw01"]["ready"]  # no platform advertised
+    # Ignore the servers; they drop out of the list
+    client.post(f"{API}/discovery/ignore", json={"names": ["yyc-esx01", "yyc-esx02"], "reason": "servers"},
+                headers=admin_h)
+    c = client.get(f"{API}/discovery/candidates", params={"snapshot": "previous"}, headers=view_h).json()
+    assert {x["name"] for x in c["items"]} == {"yyc-core-rtr02", "yyc-fw01"}
+    assert client.post(f"{API}/discovery/approve", json={"candidates": [{"name": "yyc-core-rtr02"}]},
+                       headers=view_h).status_code == 403
+    r = client.post(f"{API}/discovery/approve", headers=admin_h, json={
+        "snapshot": "previous", "site": "YYC-DC1", "role": "core-router", "mock_scenario": "t1",
+        "candidates": [{"name": "yyc-core-rtr02"}, {"name": "yyc-fw01"}]}).json()
+    assert [d["name"] for d in r["created"]] == ["yyc-core-rtr02"]
+    assert r["created"][0]["host"] == "10.10.0.2" and "discovered" in r["created"][0]["tags"]
+    assert r["errors"][0]["name"] == "yyc-fw01"  # platform unknown: must be given
+    assert r["snapshot"]  # crawl step: the new device was collected (mock data has none, so it fails)
+    fw = client.post(f"{API}/discovery/approve", headers=admin_h, json={
+        "snapshot": "previous", "collect": False, "candidates": [{"name": "yyc-fw01", "platform": "iosxe"}]}).json()
+    assert fw["created"][0]["platform"] == "iosxe"
+    assert client.delete(f"{API}/discovery/ignore/yyc-esx01", headers=admin_h).status_code == 204
+
+
+def test_snmp_aaa_tables(client, two_snapshots, view_h):
+    t = lambda table, **p: client.get(f"{API}/snapshots/latest/tables/{table}", params=p, headers=view_h).json()  # noqa: E731
+    snmp = {(r["device"], r["key"]): r for r in t("snmp")["items"]}
+    assert snmp[("yyc-core-rtr01", "community#1")]["acl"] == "10"
+    assert snmp[("yyc-dc-nxs01", "host|10.250.0.30")]["vrf"] == "management"
+    assert snmp[("yyc-core-rtr01", "user|nms-poller")]["auth"] is True
+    aaa = {(r["device"], r["key"]): r for r in t("aaa")["items"]}
+    assert aaa[("yyc-core-rtr01", "server|tacacs+|10.250.0.20")]["name"] == "ISE01"
+    assert aaa[("yyc-core-rtr01", "method|authentication login default")]["methods"] == ["group", "tacacs+", "local"]
+    assert ("yyc-dc-nxs01", "feature tacacs+") in aaa
+    for d in ("yyc-core-rtr01", "yyc-dc-nxs01"):
+        cfg = client.get(f"{API}/devices/{d}/config", headers=view_h).text
+        assert "Wj3tN0c" not in cfg and "AuthPassw0rd" not in cfg and "PrivPassw0rd" not in cfg
+    d = client.get(f"{API}/diffs", params={"table": "snmp"}, headers=view_h).json()
+    assert [(c["device"], c["key"], c["change"]) for c in d["changes"]] == [("yyc-dc-nxs01", "host|10.250.0.31", "added")]
+    rules = client.get(f"{API}/snapshots/latest", headers=view_h).json()["summary"]["checks"]["rules"]
+    assert rules["snmp-community-acl"]["status"] == "warning" and rules["snmp-community-acl"]["violations"] == 1
+    assert rules["snmp-no-rw-community"]["status"] == "pass"

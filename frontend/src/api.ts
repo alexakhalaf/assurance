@@ -108,6 +108,6 @@ export interface Diff {
   summary: any; changes: Change[]; total: number;
 }
 export const TABLES = ["facts", "interfaces", "routes", "arp", "neighbors", "bgp", "ospf", "mac", "vlans", "vrfs",
-  "hardware", "portchannels", "stp", "fhrp", "ntp", "config"] as const;
+  "hardware", "portchannels", "stp", "fhrp", "ntp", "snmp", "aaa", "config"] as const;
 export interface CheckSummary { status: string; severity: string; violations: number; }
 export interface Violation { rule?: string; device: string; key: string; message: string; severity?: string; data?: any; }

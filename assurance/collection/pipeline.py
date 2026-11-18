@@ -6,7 +6,7 @@ import re
 
 from . import genie_parse
 from .commands import COMMANDS
-from .configtext import mask_secrets, sections
+from .configtext import aaa, mask_secrets, sections, snmp
 from .normalize import normalize
 from .target import Target
 
@@ -43,4 +43,6 @@ def parse_device(device: Target, raw: dict[str, str]) -> tuple[dict, dict, list[
             genie[table] = {}
     norm = normalize(genie)
     norm["config"] = sections(raw.get("config", ""))
+    norm["snmp"] = snmp(raw.get("config", ""))
+    norm["aaa"] = aaa(raw.get("config", ""))
     return genie, norm, warnings

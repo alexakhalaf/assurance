@@ -197,6 +197,18 @@ def _fhrp_redundant(s: SnapshotData, **_):
             yield Violation(d, k, f"HSRP group {r['group']} on {r['interface']} has no standby router", r)
 
 
+def _snmp_rw(s: SnapshotData, **_):
+    for d, k, r in s.rows("snmp"):
+        if r.get("kind") == "community" and r.get("access") == "rw":
+            yield Violation(d, k, f"{r['name']} is read-write", r)
+
+
+def _snmp_acl(s: SnapshotData, **_):
+    for d, k, r in s.rows("snmp"):
+        if r.get("kind") == "community" and not r.get("acl"):
+            yield Violation(d, k, f"{r['name']} ({r.get('access')}) has no access list", r)
+
+
 # ---- delta rules (pre -> post)
 
 
@@ -317,6 +329,10 @@ BUILTIN: list[Rule] = [
          _portchannel_members),
     Rule("ntp-synchronized", "NTP synchronized", "Devices with NTP peers are synchronized to one of them.",
          FAIL, "state", ("ntp",), _ntp_synchronized),
+    Rule("snmp-no-rw-community", "No read-write SNMP community", "SNMP communities are read-only.",
+         FAIL, "state", ("snmp",), _snmp_rw),
+    Rule("snmp-community-acl", "SNMP communities restricted", "Every SNMP community is limited by an access list.",
+         WARNING, "state", ("snmp",), _snmp_acl),
     Rule("fhrp-redundant", "Gateway redundancy healthy",
          "HSRP/VRRP groups are active or standby, and HSRP groups have a standby router.",
          WARNING, "state", ("fhrp",), _fhrp_redundant),

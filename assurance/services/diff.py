@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from ..models import CollectionStatus, DeviceCollection, Snapshot, SnapshotStatus, StateRow
 
 TABLES = ("facts", "interfaces", "routes", "arp", "neighbors", "bgp", "ospf", "mac", "vlans", "vrfs", "hardware",
-          "portchannels", "stp", "fhrp", "ntp", "config")
+          "portchannels", "stp", "fhrp", "ntp", "snmp", "aaa", "config")
 DIFFABLE = (SnapshotStatus.complete, SnapshotStatus.partial)
 COLLECTED = (CollectionStatus.ok, CollectionStatus.partial)
 
@@ -240,6 +240,8 @@ def _brief(table: str, v: dict) -> dict:
         "stp": ("root_address", "root_port"),
         "fhrp": ("state", "virtual_ip"),
         "ntp": ("mode", "stratum"),
+        "snmp": ("kind", "name", "version"),
+        "aaa": ("kind", "name", "methods"),
         "config": ("lines",),
     }.get(table, ())
     return {k: v.get(k) for k in keep}

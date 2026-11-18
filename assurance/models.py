@@ -271,6 +271,16 @@ class Schedule(Base):
 # ------------------------------------------------------------------ checks
 
 
+class DiscoveryIgnore(Base):
+    """A discovered neighbor the user chose not to add to inventory (phones, servers, other vendors)."""
+
+    __tablename__ = "discovery_ignores"
+    name: Mapped[str] = mapped_column(String(255), primary_key=True)
+    reason: Mapped[str | None] = mapped_column(String(255))
+    created_by: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class CheckProfile(Base):
     """Which checks a type of change must pass, e.g. "routing change" or "firmware upgrade".
 

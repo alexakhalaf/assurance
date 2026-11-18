@@ -77,6 +77,8 @@ const COLS: Record<string, string[]> = {
   stp: ["mode", "is_root", "root_address", "root_priority", "root_port", "bridge_priority", "ports"],
   fhrp: ["interface", "protocol", "group", "state", "priority", "virtual_ip", "active_router", "standby_router"],
   ntp: ["vrf", "stratum", "mode", "synchronized"],
+  snmp: ["kind", "name", "access", "acl", "version", "vrf", "group"],
+  aaa: ["kind", "name", "protocol", "address", "methods", "members"],
   config: ["lines"],
 };
 

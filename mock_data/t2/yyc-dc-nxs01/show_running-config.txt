@@ -17,6 +17,10 @@ feature lldp
 username admin password 5 $5$KLMNOP$abcdefghijklmnopqrstuvwxyzABCDEF0123456  role network-admin
 tacacs-server host 10.250.0.20 key 7 "fewhg123"
 snmp-server community Wj3tN0c-r0 group network-operator
+snmp-server host 10.250.0.30 traps version 2c Wj3tN0c-r0
+snmp-server host 10.250.0.30 use-vrf management
+snmp-server host 10.250.0.31 traps version 2c Wj3tN0c-r0
+snmp-server location YYC-DC1 Row 4 Rack 14
 ntp server 10.250.0.10 use-vrf management
 ntp server 10.250.0.11 use-vrf management
 
