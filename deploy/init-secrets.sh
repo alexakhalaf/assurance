@@ -7,6 +7,7 @@ set -eu
 cd "$(dirname "$0")/.."
 [ -f .env ] || { echo "create .env first (cp .env.example .env)"; exit 1; }
 mkdir -p secrets
+mkdir -p secrets/tls
 umask 077
 
 if [ -s secrets/master.key ]; then

@@ -1,4 +1,5 @@
-"""Snapshot retention. Labelled snapshots are change evidence and are kept (schedule: labels don't count)."""
+"""Snapshot retention. Labelled snapshots are change evidence and are kept (schedule: labels don't count),
+and so is the newest complete snapshot, so the next one always has a baseline to diff against."""
 from __future__ import annotations
 
 import logging
@@ -11,6 +12,7 @@ from ..models import Snapshot, SnapshotStatus, utcnow
 
 log = logging.getLogger(__name__)
 OPEN = (SnapshotStatus.queued, SnapshotStatus.running, SnapshotStatus.finalizing)
+KEEP_NEWEST = (SnapshotStatus.complete, SnapshotStatus.partial)
 
 
 def is_evidence(labels) -> bool:
@@ -20,8 +22,11 @@ def is_evidence(labels) -> bool:
 def expired(keep_days: int) -> list[str]:
     cutoff = utcnow() - timedelta(days=keep_days)
     with session_scope() as db:
+        newest = db.scalar(select(Snapshot.id).where(Snapshot.status.in_(KEEP_NEWEST))
+                           .order_by(Snapshot.created_at.desc()).limit(1))
         rows = db.execute(select(Snapshot.id, Snapshot.labels, Snapshot.status).where(Snapshot.created_at < cutoff))
-        return [sid for sid, labels, status in rows if status not in OPEN and not is_evidence(labels)]
+        return [sid for sid, labels, status in rows
+                if status not in OPEN and not is_evidence(labels) and sid != newest]
 
 
 def delete_snapshots(ids: list[str]) -> int:

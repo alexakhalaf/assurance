@@ -155,15 +155,18 @@ def test_retention_keeps_labelled_snapshots(client, inventory, oper_h, admin_h, 
     from assurance.services.retention import prune
 
     ids = []
-    for labels in ([], ["schedule:hourly"], ["change:CHG1"]):
+    for labels in ([], ["schedule:hourly"], ["change:CHG1"], ["schedule:hourly"]):
         r = client.post(f"{API}/snapshots", json={"mock_scenario": "t1", "labels": labels}, headers=oper_h)
         ids.append(r.json()["id"])
-    with session_scope() as db:
-        db.execute(update(Snapshot).values(created_at=utcnow() - timedelta(days=100)))
+    with session_scope() as db:  # all older than 90 days; the last one is the newest
+        for i, sid in enumerate(ids):
+            db.execute(update(Snapshot).where(Snapshot.id == sid)
+                       .values(created_at=utcnow() - timedelta(days=100) + timedelta(minutes=i)))
     assert prune(90, dry_run=True) == {"expired": 2, "deleted": 0}
     assert prune(90, dry_run=False) == {"expired": 2, "deleted": 2}
     left = client.get(f"{API}/snapshots", headers=view_h).json()["items"]
-    assert [s["id"] for s in left] == [ids[2]]
+    # change evidence is kept, and so is the newest snapshot (the next diff's baseline)
+    assert sorted(s["id"] for s in left) == sorted([ids[2], ids[3]])
 
 
 def test_delete_snapshot_needs_admin(client, two_snapshots, oper_h, admin_h, view_h):
@@ -224,3 +227,22 @@ def test_filesystem_store_concurrent_writes_of_one_object(tmp_path):
         list(pool.map(lambda _: store.put("raw/e3/same.gz", b"x" * 1000), range(200)))
     assert store.get("raw/e3/same.gz") == b"x" * 1000
     assert not list(tmp_path.rglob("*.tmp"))
+
+
+def test_metrics_token(client, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from assurance.api.app import create_app
+    from assurance.config import get_settings
+
+    assert client.get("/metrics").status_code == 200  # open by default
+    monkeypatch.setenv("ASSURANCE_METRICS_TOKEN", "scrape-secret")
+    get_settings.cache_clear()
+    try:
+        c = TestClient(create_app())
+        assert c.get("/metrics").status_code == 401
+        assert c.get("/metrics", headers={"Authorization": "Bearer wrong"}).status_code == 401
+        assert c.get("/metrics", headers={"Authorization": "Bearer scrape-secret"}).status_code == 200
+    finally:
+        monkeypatch.delenv("ASSURANCE_METRICS_TOKEN")
+        get_settings.cache_clear()

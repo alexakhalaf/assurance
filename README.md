@@ -202,6 +202,10 @@ All settings are environment variables (or `.env`), prefixed `ASSURANCE_`.
 | `RATE_LIMIT_PER_MINUTE` | `600` | Per API token, or per client IP without a token. `0` turns it off |
 | `RATE_LIMIT_LOGIN_PER_MINUTE` | `10` | Password login and SSO start/exchange, per client IP |
 | `MAX_REQUEST_BYTES` | `20971520` | Larger request bodies get 413 |
+| `RETENTION_DAYS` | `0` | Scheduler deletes snapshots older than this, hourly. `0` keeps all. Snapshots with any label other than `schedule:…`, and the newest complete one, are always kept |
+| `STALE_RUNNING_MINUTES`, `STALE_PENDING_MINUTES` | `30`, `360` | A device collection stuck this long (worker killed, Redis flushed) is marked failed so its snapshot finishes |
+| `WEBHOOK_ALLOWED_HOSTS` | `[]` | Snapshot webhooks to private, loopback or link-local addresses are refused unless the host is listed |
+| `METRICS_TOKEN` | | When set, `/metrics` needs `Authorization: Bearer <token>` |
 | `TRUSTED_PROXIES` | `[]` | JSON list of proxy IPs/CIDRs whose `X-Forwarded-For` is believed, e.g. `["10.0.0.0/8"]` |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM` | | Mail server for scheduled reports |
 | `SMTP_USERNAME`, `SMTP_PASSWORD` | | Optional SMTP auth |
@@ -218,7 +222,7 @@ All settings are environment variables (or `.env`), prefixed `ASSURANCE_`.
 
 ## Observability
 
-- `/metrics` (Prometheus): API requests and latency per route, collections and their duration per
+- `/metrics` (Prometheus; set `METRICS_TOKEN` to require a bearer token): API requests and latency per route, collections and their duration per
   platform, parser warnings per command, snapshots, devices by status, rate-limited requests.
 - JSON logs with `request_id`, plus `trace_id` when tracing is on.
 - OpenTelemetry tracing (`ASSURANCE_OTEL_ENDPOINT`): one trace per snapshot request covers the API call,
@@ -241,6 +245,20 @@ back any object missing from the store, then migrates to the running version, so
 older release restores into a newer one. Use `--no-objects` when the bucket has its own replication.
 The **master key is not in the backup**; keep it with your secrets, or restored device credentials
 cannot be decrypted. With Compose: `docker compose run --rm -v $PWD:/backups api assurance-admin backup /backups/a.tar`.
+
+## Upgrading
+
+`assurance-admin migrate` (the Compose `migrate` service, or the Helm pre-upgrade hook) applies schema
+changes. Upgrading to 0.5:
+
+- Migrations 0008 and 0009 build two indexes on `state_rows` with `CREATE INDEX CONCURRENTLY`: the
+  app keeps working while they build, which takes a few minutes per million rows. They need the
+  `pg_trgm` extension (trusted since PostgreSQL 13, so the database owner can create it).
+- Interfaces: `speed` is now `speed_mbps`, a number in Mb/s (it was the device's text, e.g. `1000mbps`),
+  and `duplex` is `full`, `half` or `auto`. Snapshots taken before the upgrade keep the old field, so the
+  first diff afterwards shows every interface's speed as changed once.
+- Compose now publishes only HTTPS (443) through the `proxy` service; set `ASSURANCE_HOSTNAME` and
+  `ASSURANCE_TLS` in `.env` (see `.env.example`). The API port is bound to 127.0.0.1.
 
 ## Load testing
 

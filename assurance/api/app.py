@@ -1,6 +1,7 @@
 """FastAPI application: /api/v1, health, metrics, and the web UI."""
 from __future__ import annotations
 
+import hmac
 import logging
 import time
 import uuid
@@ -142,7 +143,10 @@ def create_app() -> FastAPI:
         return JSONResponse({"status": "ok" if ok else "degraded", "checks": checks}, status_code=200 if ok else 503)
 
     @app.get("/metrics", include_in_schema=False)
-    def prom():
+    def prom(request: Request):
+        if s.metrics_token and not hmac.compare_digest(
+                request.headers.get("authorization", ""), f"Bearer {s.metrics_token}"):
+            return PlainTextResponse("metrics token required\n", status_code=401)
         try:
             from sqlalchemy import func, select
 

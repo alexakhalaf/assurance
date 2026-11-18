@@ -1,0 +1,23 @@
+# TLS front end for Assurance (docker-compose.yml, service "proxy").
+# ASSURANCE_TLS "internal" (default): Caddy's own CA. An e-mail address: Let's Encrypt for a public name.
+# "/run/tls/cert.pem /run/tls/key.pem": your organisation's certificate.
+{
+	servers {
+		trusted_proxies static private_ranges
+	}
+}
+
+{$ASSURANCE_HOSTNAME} {
+	tls {$ASSURANCE_TLS}
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+	# Large CSV and XLSX exports, and fleet-wide pre/post on 500+ devices, can take a while.
+	reverse_proxy api:8000 {
+		transport http {
+			read_timeout 300s
+		}
+	}
+}

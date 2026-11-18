@@ -2,15 +2,22 @@
 #   cp .env.example .env        # set every password
 #   ./deploy/init-secrets.sh    # creates secrets/master.key
 #   docker compose up -d --build
-#   open http://localhost:8000  (user "admin", password ASSURANCE_BOOTSTRAP_ADMIN_PASSWORD)
+#   open https://$ASSURANCE_HOSTNAME  (user "admin", password ASSURANCE_BOOTSTRAP_ADMIN_PASSWORD)
+#
+# TLS: the "proxy" service (Caddy) terminates HTTPS on 443 and is the only port published.
+#   - a public DNS name: set ASSURANCE_TLS to your e-mail and Caddy gets a Let's Encrypt certificate;
+#   - an internal name: put your certificate and key in ./secrets/tls/ (cert.pem, key.pem)
+#     and set ASSURANCE_TLS=/run/tls/cert.pem /run/tls/key.pem in .env;
+#   - default (ASSURANCE_TLS=internal): Caddy's own CA, fine for a lab (browsers will warn).
+# The API itself listens only on the internal network (and 127.0.0.1:8000 for local checks).
 
 x-app: &app
-  image: assurance:${ASSURANCE_VERSION:-0.1.0}
+  image: assurance:${ASSURANCE_VERSION:-0.5.0}
   build: .
   restart: unless-stopped
   init: true
   env_file: .env
-  environment:
+  environment: &app-env
     ASSURANCE_ENV: prod
     ASSURANCE_DATABASE_URL: postgresql+psycopg://assurance:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/assurance
     ASSURANCE_REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/0
@@ -79,7 +86,28 @@ services:
 
   api:
     <<: *app
-    ports: ["${ASSURANCE_PORT:-8000}:8000"]
+    # Several processes so one slow request (a fleet-wide diff or export) never blocks the UI.
+    command: ["uvicorn", "--factory", "assurance.api.app:create_app", "--host", "0.0.0.0", "--port", "8000",
+              "--proxy-headers", "--forwarded-allow-ips", "*", "--no-server-header",
+              "--workers", "${ASSURANCE_API_WORKERS:-4}"]
+    environment:
+      <<: *app-env
+      # Only the proxy can reach the API port, so its X-Forwarded-For is believed (audit log, rate limit).
+      ASSURANCE_TRUSTED_PROXIES: '["172.16.0.0/12", "192.168.0.0/16", "10.0.0.0/8"]'
+    ports: ["127.0.0.1:${ASSURANCE_PORT:-8000}:8000"]
+
+  proxy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    ports: ["443:443", "80:80"]
+    environment:
+      ASSURANCE_HOSTNAME: ${ASSURANCE_HOSTNAME:?set ASSURANCE_HOSTNAME (the name users browse to)}
+      ASSURANCE_TLS: ${ASSURANCE_TLS:-internal}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./secrets/tls:/run/tls:ro
+      - caddydata:/data
+    depends_on: [api]
 
   worker:
     <<: *app
@@ -105,3 +133,4 @@ volumes:
   pgdata:
   redisdata:
   objdata:
+  caddydata:

@@ -68,6 +68,8 @@ class Settings(BaseSettings):
     max_request_bytes: int = 20 * 1024 * 1024
     # Reverse proxies whose X-Forwarded-For is believed (IPs or CIDRs). Empty: use the socket address.
     trusted_proxies: list[str] = []
+    # When set, /metrics needs "Authorization: Bearer <token>" (Prometheus: authorization.credentials)
+    metrics_token: str | None = Field(default=None, repr=False)
 
     # Webhooks
     webhook_secret: str | None = Field(default=None, repr=False)
