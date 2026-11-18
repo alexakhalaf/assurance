@@ -14,3 +14,4 @@ secrets/
 node_modules/
 frontend/dist/
 assurance/ui/
+*.tsbuildinfo

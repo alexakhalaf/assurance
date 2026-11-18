@@ -1,73 +1,201 @@
-# Assurance snapshot collector (prototype)
+# Assurance
 
-Standalone tool that snapshots Cisco IOS-XE and NX-OS devices, stores timestamped
-snapshots, and shows what changed between two points in time. No external source
-of truth: devices come from a local `inventory.yaml`.
+Standalone network assurance for Cisco IOS-XE and NX-OS. Assurance keeps its own device inventory
+and credentials, snapshots operational state from every device, parses it with Cisco Genie, keeps
+every snapshot, and answers one question well: **what changed between time A and time B, and where.**
 
-Pipeline: **inventory.yaml → pyATS/Unicon (SSH) → raw text → Genie parsers → normalized JSON → diff**
+Everything is available over a versioned REST API first, with a web UI and a CLI on top. It has no
+dependency on any external source of truth or orchestrator.
 
-Collected per device: interfaces, IPv4 routing table (all VRFs on NX-OS), ARP, CDP and LLDP neighbors.
+![Dashboard](docs/screenshots/dashboard.png)
 
-## Install
+> Release **0.1 (lab alpha)**: inventory, credential store, Genie collection for the core tables,
+> snapshots, diff API, CLI and web UI. See [Roadmap](#roadmap) for what comes next.
+
+## What it does
+
+| Area | 0.1 |
+|---|---|
+| Inventory | Devices, sites, tags, roles, status (active / maintenance / retired); CSV import with dry run; CSV export |
+| Credentials | Credential profiles, envelope-encrypted (AES-256-GCM, master key outside the DB); resolved device → site → `default`; write-only over the API |
+| Collection | SSH via pyATS/Unicon, parsing with Genie; one job per device on a Redis queue; per-device lock; jitter; partial results kept when a parser fails |
+| Data collected | Facts (`show version`), interfaces, IPv4 routes (all VRFs on NX-OS), ARP, CDP and LLDP neighbors |
+| Snapshots | On demand (API, CLI, UI) or on a cron schedule; labels (e.g. `change:CHG0012345`); per-device status; raw CLI text and full Genie output kept in S3 object storage |
+| Diff | Keyed diff per table: added / removed / changed with the fields that changed; volatile fields (counters, ages, uptime) ignored; failed devices reported as *unknown*, not as removed; time windows (`24h`, ISO times, `previous`, `latest`) |
+| History | Change timeline per device |
+| UI | Dashboard (change trend, platforms, OS versions, failures, most-changed devices), devices, snapshots, state tables with search and CSV export, raw output viewer, compare view, settings |
+| API | FastAPI under `/api/v1`, OpenAPI at `/api/v1/openapi.json`, docs at `/api/docs`; RFC 9457 problem JSON errors; signed webhooks |
+| Access | Local users (Argon2), roles viewer / operator / admin, login lockout, API tokens (hashed, expiring, revocable), audit log |
+| Operations | `/healthz`, `/readyz`, Prometheus `/metrics`, JSON logs with request ids, Alembic migrations, retention pruning |
+
+## Quick start (Docker Compose, single server)
 
 ```bash
-python3 -m venv .venv && . .venv/bin/activate
-pip install -e '.[dev]'          # pulls pyats[library] (Genie + Unicon); Linux/macOS, Python 3.10-3.13
+cp .env.example .env           # set every password
+./deploy/init-secrets.sh       # creates secrets/master.key and secrets/s3.json
+docker compose up -d --build
 ```
 
-## Run on mock data (no lab needed)
+Open <http://localhost:8000> and sign in as `admin` with `ASSURANCE_BOOTSTRAP_ADMIN_PASSWORD`. Then:
+
+1. **Settings → Device credentials**: add a profile named `default` (a read-only account limited to show commands).
+2. **Devices → Import CSV**: `name,host,platform,site,role,tags` (platform `iosxe` or `nxos`).
+3. **Snapshots → New snapshot**, or add an hourly schedule under Settings.
+
+The stack is PostgreSQL 16, Redis 7, an S3-compatible object store (SeaweedFS bundled; MinIO,
+Ceph RGW or AWS S3 work by setting `ASSURANCE_S3_ENDPOINT_URL`), the API/UI, two collection workers
+and the scheduler. App containers run as a non-root user on read-only file systems.
+
+**Try it without devices:** set `ASSURANCE_COLLECTOR=mock` in `.env`, then take two snapshots from
+the captured lab output in `mock_data/`:
 
 ```bash
-assurance --store snapshots collect -i mock_data/inventory.yaml --mock-dir mock_data/t1 --at 2026-11-17T08:00:00Z
-assurance --store snapshots collect -i mock_data/inventory.yaml --mock-dir mock_data/t2 --at 2026-11-18T08:00:00Z
-assurance --store snapshots list
-assurance --store snapshots diff                 # previous -> latest
-assurance --store snapshots diff 24h latest      # what changed in the last 24 hours
-assurance --store snapshots diff previous latest --json
-pytest -q
-```
-
-`mock_data/t2` differs from `t1` by: rtr01 Gi3 link down (OSPF/connected routes, ARP and CDP
-neighbor lost, ECMP collapses to one path), a new BGP prefix, a description change; nxs01 a new
-static route, an ARP MAC move, and an ESXi host swap on Eth1/3 (LLDP + description).
-
-## Run against real devices
-
-```bash
-cp inventory.example.yaml inventory.yaml        # edit
-export DEVICE_USERNAME=... DEVICE_PASSWORD=...  # optional DEVICE_ENABLE_PASSWORD
-assurance collect --filter site=YYC-DC1          # filters: site, role, platform, name, tag
+assurance snapshot --mock-scenario t1
+assurance snapshot --mock-scenario t2
 assurance diff
 ```
 
-## Snapshot layout
+`t2` differs from `t1` by: rtr01 Gi3 link down (routes, ARP and CDP neighbor lost, ECMP collapses),
+a new BGP prefix and a description change; nxs01 an OS upgrade, a new static route, an ARP MAC move
+and an ESXi host swap on Eth1/3.
 
-```
-snapshots/<YYYYMMDDTHHMMSSZ>/
-  manifest.json          id, time, devices, errors, parser warnings
-  devices/<name>.json    normalized tables (what diffs run on)
-  genie/<name>.json      full Genie output
-  raw/<name>/<cmd>.txt   raw CLI text, so old snapshots can be re-parsed
+![Compare two snapshots](docs/screenshots/compare.png)
+
+## CLI
+
+The `assurance` command is a client of the API, so it runs anywhere that can reach the server.
+
+```bash
+pip install .                                    # or use the container image
+assurance login --url https://assurance.example.com
+assurance devices import devices.csv             # dry run; add --apply to write
+assurance snapshot --site YYC-DC1 --label change:CHG0012345     # waits, prints the id
+assurance snapshots list
+assurance diff                                   # previous -> latest
+assurance diff 24h now --table routes            # what changed in the last 24 hours
+assurance diff <pre-id> <post-id> --fail-on-change   # exit 3 if anything changed
+assurance snapshots table routes --device yyc-core-rtr01 -q bgp
+assurance devices history yyc-core-rtr01 --since 7d
 ```
 
-Diff refs accept a snapshot id, `latest`, `previous`, an ISO time (nearest snapshot at or
-before it), or an age like `90m`, `24h`, `7d`.
+`ASSURANCE_URL` and `ASSURANCE_TOKEN` override the stored login, which is handy in pipelines.
+
+Server administration uses `assurance-admin`: `migrate`, `create-user`, `reset-password`,
+`gen-master-key`, `worker`, `scheduler`, `prune`.
+
+### Pre/post change check
+
+```bash
+PRE=$(assurance snapshot --site YYC-DC1 --label change:CHG0012345)
+# ... make the change ...
+POST=$(assurance snapshot --site YYC-DC1 --label change:CHG0012345)
+assurance diff "$PRE" "$POST"
+```
+
+Snapshots with labels are kept by `assurance-admin prune`, so the evidence stays available.
+
+## API
+
+Authenticate with `Authorization: Bearer <token>`: create a token under Settings → API tokens, or
+`POST /api/v1/auth/login`. The full reference is served at `/api/docs`.
+
+| Method and path | Purpose |
+|---|---|
+| `GET/POST /devices`, `GET/PATCH/DELETE /devices/{name}` | Inventory |
+| `POST /devices/import?dry_run=true`, `GET /devices/export.csv` | CSV import and export |
+| `GET/POST /sites`, `PATCH/DELETE /sites/{name}` | Sites (optional default credential per site) |
+| `GET/POST /credentials`, `PATCH/DELETE /credentials/{name}` | Credential profiles; secrets are write-only |
+| `POST /snapshots` | Start a snapshot: `{scope: {site, role, platform, tags, devices}, labels, callback_url}`. Returns **202** and a `Location` |
+| `GET /snapshots`, `GET /snapshots/{ref}` | List and status. `ref` is an id, `latest`, `previous`, an ISO time or an age like `24h` |
+| `GET /snapshots/{ref}/tables/{table}` | Normalized state. Filter by any field (`?protocol=bgp&vrf=default`), `?q=` search, `?format=csv` |
+| `GET /snapshots/{ref}/raw/{device}[/{command}]` | Raw CLI text, or `?kind=genie` for the full parser output |
+| `GET /diffs?from=&to=` | Diff; `table`, `device`, `change`, `format=json\|text\|csv`. `since`/`until` are aliases for time windows |
+| `GET /devices/{name}/history` | Change timeline for one device |
+| `GET /stats/overview` | Dashboard numbers |
+| `GET/POST /schedules`, `PATCH/DELETE /schedules/{name}` | Cron schedules (UTC) |
+| `POST /auth/login`, `/auth/logout`, `GET /auth/me`, `GET/POST/DELETE /auth/tokens` | Sessions and API tokens |
+| `GET/POST /users`, `PATCH /users/{name}` | Users (admin) |
+| `GET /audit` | Audit log (admin) |
+
+Tables: `facts`, `interfaces`, `routes`, `arp`, `neighbors`. A diff change looks like
+`{device, table, key, change: added|removed|changed, before, after, fields_changed}`.
+
+Webhooks: when `callback_url` is given, a `snapshot.finished` event is POSTed when the snapshot
+completes, signed with `X-Assurance-Signature: sha256=<HMAC-SHA256 of the body>` using
+`ASSURANCE_WEBHOOK_SECRET`, and retried with backoff.
+
+## Configuration
+
+All settings are environment variables (or `.env`), prefixed `ASSURANCE_`.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `DATABASE_URL` | `postgresql+psycopg://…/assurance` | PostgreSQL 16 |
+| `REDIS_URL` | `redis://localhost:6379/0` | Job queue, device locks, scheduler leader lock |
+| `OBJECT_STORE` | `s3` | `s3` or `filesystem` (lab only) |
+| `S3_ENDPOINT_URL`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` | | Bucket is created if missing |
+| `MASTER_KEY_FILE` / `MASTER_KEY` | | 32-byte base64 key for the credential store. Prefer the file. **Back it up separately**; losing it means re-entering device credentials |
+| `JOB_BACKEND` | `rq` | `rq` (workers), `thread` (single process, lab), `sync` (tests) |
+| `COLLECTOR` | `live` | `live` (SSH) or `mock` (reads `MOCK_ROOT`) |
+| `COLLECT_TIMEOUT` | `60` | Seconds per command |
+| `COLLECT_JITTER_SECONDS` | `2` | Random delay before each device connects |
+| `SESSION_HOURS`, `MAX_FAILED_LOGINS`, `LOCKOUT_MINUTES` | `12`, `5`, `15` | |
+| `BOOTSTRAP_ADMIN_PASSWORD` | | Creates user `admin` on the first `migrate` when no user exists |
+| `WEBHOOK_SECRET` | | HMAC key for webhook signatures |
+| `LOG_LEVEL`, `LOG_JSON` | `INFO`, `true` | |
+
+## Development
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install -e '.[dev]'
+export TEST_DATABASE_URL=postgresql+psycopg://postgres@localhost:5432/assurance_test
+pytest                       # needs a PostgreSQL database; uses mock_data and the filesystem store
+ruff check assurance tests
+
+cd frontend && npm ci && npm run dev    # UI on :5173, proxies /api to :8000
+npm run build                           # writes assurance/ui, served by the API
+```
+
+Run the API locally with `uvicorn --factory assurance.api.app:create_app --reload` and
+`ASSURANCE_JOB_BACKEND=thread` so no worker is needed.
 
 ## Code map
 
-| File | Role |
+| Path | Role |
 |---|---|
-| `assurance/inventory.py` | Loads and filters `inventory.yaml` |
-| `assurance/commands.py` | Commands per OS (each has a Genie parser) |
-| `assurance/collectors.py` | `LiveCollector` (pyATS/Unicon) and `MockCollector` (files) |
-| `assurance/genie_parse.py` | Offline Genie parsing of raw text |
-| `assurance/normalize.py` | Genie → stable, diffable tables (drops counters, ages, timers) |
-| `assurance/store.py` | Filesystem snapshot store + time-window resolution |
-| `assurance/diff.py` | Added / removed / changed per table, text and JSON output |
-| `assurance/cli.py` | `collect`, `list`, `diff` |
+| `assurance/collection/` | Commands per OS, pyATS/Unicon and mock collectors, offline Genie parsing, normalizers |
+| `assurance/services/snapshots.py` | Snapshot lifecycle: create, per-device job, finalize, webhooks |
+| `assurance/services/diff.py` | Snapshot reference resolution and the keyed diff engine |
+| `assurance/services/inventory.py` | Scope resolution, validation, CSV import/export |
+| `assurance/services/credentials.py`, `security/crypto.py` | Credential profiles and envelope encryption |
+| `assurance/services/schedules.py` | Cron schedules and the scheduler loop |
+| `assurance/api/` | FastAPI app, routes, schemas, auth dependencies, problem JSON |
+| `assurance/cli/` | `assurance` (API client) and `assurance-admin` |
+| `assurance/models.py`, `migrations/` | Database schema and Alembic migrations |
+| `frontend/` | React + TypeScript + ECharts UI |
+| `mock_data/` | Captured IOS-XE and NX-OS output for tests and demos |
 
-## Not done yet
+## Security notes
 
-- `LiveCollector` is written but untested against a real device.
-- No HTTP API yet; `store.py` and `diff.py` are the pieces an API would wrap.
-- IPv6, BGP neighbors, VLANs/MAC table, and other VRFs on IOS-XE are not collected yet.
+- Device secrets are encrypted per profile with a random data key, which is itself encrypted by the
+  master key. Ciphertext is bound to its profile and field, and secrets never appear in API
+  responses, logs or the audit log.
+- API tokens and session tokens are 256-bit random values stored as SHA-256 hashes. Passwords use Argon2.
+- Every change to inventory, credentials, schedules, users and tokens, and every snapshot request, is audited.
+- The UI is served with a strict Content Security Policy, `X-Frame-Options: DENY` and `nosniff`.
+- Use a dedicated read-only device account (TACACS+ command authorization or a low privilege level).
+- Put TLS in front of the API (reverse proxy or load balancer) in any shared environment.
+
+## Roadmap
+
+From the architecture doc's release plan:
+
+- **0.5 beta (pilot site):** remaining technology tables (BGP, OSPF, MAC, VLANs, port-channels, STP,
+  HSRP/VRRP, VRFs, NTP, inventory, configs), intent checks, topology maps, pre/post compare endpoint
+  with check profiles, reports, SSH host key pinning.
+- **1.0 GA:** HA deployment (Helm), OIDC SSO, backup/restore, OpenTelemetry tracing, hardening and pen test.
+
+Known gaps in 0.1: the live collector has not been run against real devices yet (mock data only);
+IOS-XE collects the global routing table only (no per-VRF commands yet); no IPv6; no
+reachability check when a device is added; no rate limiting on the API.
