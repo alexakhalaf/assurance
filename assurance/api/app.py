@@ -17,7 +17,7 @@ from ..config import get_settings
 from ..db import session_scope
 from ..logging_setup import configure_logging, request_id
 from . import errors
-from .routes import admin, analysis, auth, checks, discovery, inventory, search, snapshots
+from .routes import admin, analysis, auth, checks, discovery, inventory, reports_sched, search, snapshots
 
 log = logging.getLogger(__name__)
 
@@ -72,7 +72,7 @@ def create_app() -> FastAPI:
 
     api = APIRouter(prefix="/api/v1")
     for r in (auth.router, inventory.router, snapshots.router, checks.router, analysis.router, search.router,
-              discovery.router, admin.router):
+              discovery.router, reports_sched.router, admin.router):
         api.include_router(r)
     app.include_router(api)
 

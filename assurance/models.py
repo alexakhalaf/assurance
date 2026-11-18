@@ -268,6 +268,25 @@ class Schedule(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class ReportSchedule(Base):
+    """A report built on a cron schedule and emailed as an attachment."""
+
+    __tablename__ = "report_schedules"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True)
+    report: Mapped[str] = mapped_column(String(16))  # changes | compliance | inventory
+    format: Mapped[str] = mapped_column(String(8), default="xlsx")  # html | csv | xlsx
+    window: Mapped[str] = mapped_column(String(16), default="24h")  # changes report: from this age to now
+    cron: Mapped[str] = mapped_column(String(64))
+    recipients: Mapped[list] = mapped_column(JSONType, default=list)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_status: Mapped[str | None] = mapped_column(String(255))
+    created_by: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 # ------------------------------------------------------------------ checks
 
 

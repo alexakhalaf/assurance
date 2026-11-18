@@ -54,6 +54,15 @@ class Settings(BaseSettings):
 
     # Webhooks
     webhook_secret: str | None = Field(default=None, repr=False)
+    # Email (scheduled reports)
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password: str | None = Field(default=None, repr=False)
+    smtp_starttls: bool = True
+    smtp_ssl: bool = False
+    smtp_from: str = "assurance@localhost"
+    smtp_timeout: float = 30.0
     webhook_timeout: float = 10.0
 
     # UI build to serve at "/". Empty or missing directory disables it.

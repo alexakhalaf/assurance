@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { download, getToken, qs, Snapshot } from "../api";
-import { Card, ErrorNote, PageHeader } from "../components/ui";
+import { api, download, getToken, qs, Snapshot } from "../api";
+import { useAuth } from "../auth";
+import { Card, Empty, ErrorNote, PageHeader } from "../components/ui";
 import { fmtTime, useApi } from "../hooks";
 
 const REPORTS = [
@@ -67,7 +68,62 @@ export default function Reports() {
           );
         })}
       </div>
-      <p className="muted">The same reports are available from the API (<code>/api/v1/reports/…</code>) and the CLI (<code>assurance report changes -o changes.xlsx</code>), for scheduled delivery.</p>
+      <ScheduledReports />
+      <p className="muted">The same reports are available from the API (<code>/api/v1/reports/…</code>) and the CLI (<code>assurance report changes -o changes.xlsx</code>).</p>
     </>
+  );
+}
+
+function ScheduledReports() {
+  const { can } = useAuth();
+  const list = useApi<any[]>("/report-schedules");
+  const [f, setF] = useState({ name: "", report: "changes", format: "xlsx", window: "24h", cron: "0 7 * * 1-5", recipients: "" });
+  const [err, setErr] = useState<string | null>(null);
+  const upd = (k: string, v: string) => setF((x) => ({ ...x, [k]: v }));
+
+  async function create() {
+    setErr(null);
+    try {
+      await api("/report-schedules", { method: "POST", body: JSON.stringify({ ...f, recipients: f.recipients.split(/[\s,;]+/).filter(Boolean) }) });
+      setF((x) => ({ ...x, name: "", recipients: "" })); list.reload();
+    } catch (e: any) { setErr(e.message); }
+  }
+  async function run(name: string) { await api(`/report-schedules/${name}/run`, { method: "POST" }); list.reload(); }
+  async function toggle(s: any) { await api(`/report-schedules/${s.name}`, { method: "PATCH", body: JSON.stringify({ enabled: !s.enabled }) }); list.reload(); }
+  async function remove(name: string) { if (confirm(`Delete scheduled report ${name}?`)) { await api(`/report-schedules/${name}`, { method: "DELETE" }); list.reload(); } }
+
+  return (
+    <Card title="Scheduled reports" actions={<span className="muted">Emailed as attachments. Times are UTC cron.</span>}>
+      {(list.data || []).length === 0 ? <Empty>No scheduled reports.</Empty> : (
+        <table className="tbl dense">
+          <thead><tr><th>Name</th><th>Report</th><th>Schedule</th><th>Recipients</th><th>Last run</th><th></th></tr></thead>
+          <tbody>{list.data!.map((s) => (
+            <tr key={s.name}>
+              <td><strong>{s.name}</strong>{!s.enabled && <span className="tag">paused</span>}</td>
+              <td>{s.report} · {s.format}{s.report === "changes" ? ` · last ${s.window}` : ""}</td>
+              <td className="mono">{s.cron}<div className="muted">next {fmtTime(s.next_run_at)}</div></td>
+              <td>{s.recipients.join(", ")}</td>
+              <td>{s.last_run_at ? <>{fmtTime(s.last_run_at)}<div className={s.last_status?.startsWith("failed") ? "bad" : "muted"}>{s.last_status}</div></> : "never"}</td>
+              <td>{can("admin") && <div className="row gap end">
+                <button className="btn sm" onClick={() => run(s.name)}>Send now</button>
+                <button className="btn sm ghost" onClick={() => toggle(s)}>{s.enabled ? "Pause" : "Resume"}</button>
+                <button className="btn sm ghost danger" onClick={() => remove(s.name)}>Delete</button></div>}</td>
+            </tr>
+          ))}</tbody>
+        </table>
+      )}
+      {can("admin") && (
+        <div className="form-inline">
+          <input placeholder="name" value={f.name} onChange={(e) => upd("name", e.target.value)} style={{ width: 140 }} />
+          <select value={f.report} onChange={(e) => upd("report", e.target.value)}><option value="changes">Changes</option><option value="compliance">Compliance</option><option value="inventory">Inventory</option></select>
+          <select value={f.format} onChange={(e) => upd("format", e.target.value)}><option value="xlsx">Excel</option><option value="html">HTML</option><option value="csv">CSV</option></select>
+          {f.report === "changes" && <select value={f.window} onChange={(e) => upd("window", e.target.value)}><option value="24h">last 24 h</option><option value="7d">last 7 days</option><option value="30d">last 30 days</option></select>}
+          <input className="mono" placeholder="cron" value={f.cron} onChange={(e) => upd("cron", e.target.value)} style={{ width: 130 }} />
+          <input placeholder="recipients, comma separated" value={f.recipients} onChange={(e) => upd("recipients", e.target.value)} style={{ minWidth: 260 }} />
+          <button className="btn primary" disabled={!f.name || !f.recipients} onClick={create}>Schedule</button>
+        </div>
+      )}
+      <ErrorNote error={err} />
+    </Card>
   );
 }

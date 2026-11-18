@@ -76,6 +76,10 @@ def scheduler_loop(interval: float = 20.0) -> None:  # pragma: no cover - long r
                     lock.reacquire()
                 for sid in run_due():
                     log.info("scheduled snapshot %s started", sid)
+                from .report_mail import run_due as run_due_reports
+
+                for name in run_due_reports():
+                    log.info("scheduled report %s run", name)
         except Exception:
             log.exception("scheduler tick failed")
         time.sleep(interval)
