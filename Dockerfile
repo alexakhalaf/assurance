@@ -32,8 +32,8 @@ RUN if [ -n "$PG_CLIENT" ]; then \
       && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
       && APT_PACKAGES="$APT_PACKAGES postgresql-client-${PG_CLIENT}"; \
     fi \
- && apt-get update && apt-get upgrade -y \
- && if [ -n "$APT_PACKAGES" ]; then apt-get install -y --no-install-recommends $APT_PACKAGES; fi \
+ && if [ -n "$APT_PACKAGES" ]; then apt-get update && apt-get upgrade -y \
+      && apt-get install -y --no-install-recommends $APT_PACKAGES; fi \
  && if [ -n "$PG_CLIENT" ]; then apt-get purge -y curl && apt-get autoremove -y; fi \
  && apt-get clean && rm -rf /var/lib/apt/lists/* \
  && useradd --system --uid 10001 --home /home/assurance --create-home assurance \
