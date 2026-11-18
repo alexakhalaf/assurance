@@ -71,3 +71,11 @@ def test_gc_objects(two_snapshots):
     assert "1 deleted" in r.output and not path.exists() and store.exists("raw/fe/fresh.gz")
     with session_scope() as db:
         assert all(store.exists(k) for (k,) in db.query(RawOutput.object_key))
+
+
+def test_restore_refuses_newer_client_tools(monkeypatch):
+    monkeypatch.setattr(backup, "_client_major", lambda exe: 99)
+    with pytest.raises(backup.BackupError, match="PostgreSQL 99 but the server is"):
+        backup._check_client("pg_restore")
+    monkeypatch.setattr(backup, "_client_major", lambda exe: 1)
+    backup._check_client("pg_restore")
