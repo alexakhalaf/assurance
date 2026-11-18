@@ -246,3 +246,28 @@ def test_metrics_token(client, monkeypatch):
     finally:
         monkeypatch.delenv("ASSURANCE_METRICS_TOKEN")
         get_settings.cache_clear()
+
+
+def test_inventory_report_is_from_the_snapshot(client, two_snapshots, view_h):
+    t1, t2 = two_snapshots
+    old = client.get(f"{API}/reports/inventory", params={"snapshot": t1, "format": "csv"}, headers=view_h).text
+    new = client.get(f"{API}/reports/inventory", params={"snapshot": t2, "format": "csv"}, headers=view_h).text
+    assert "10.3(4a)" in old and "10.3(5)" not in old  # NX-OS was upgraded between t1 and t2
+    assert "10.3(5)" in new
+
+
+def test_retention_thins_to_one_per_day(client, inventory, oper_h, view_h):
+    from assurance.services.retention import prune
+
+    ids = [client.post(f"{API}/snapshots", json={"mock_scenario": "t1", "labels": labels}, headers=oper_h).json()["id"]
+           for labels in ([], [], ["change:CHG2"], [], [])]
+    base = utcnow().replace(hour=1, minute=0, second=0, microsecond=0) - timedelta(days=20)
+    when = [base, base + timedelta(hours=5), base + timedelta(hours=6),  # day 1: two routine + evidence
+            base + timedelta(days=1), base + timedelta(days=19)]          # day 2: one; then the recent one
+    with session_scope() as db:
+        for sid, t in zip(ids, when, strict=True):
+            db.execute(update(Snapshot).where(Snapshot.id == sid).values(created_at=t))
+    r = prune(0, dry_run=False, thin_after_days=7)
+    assert r == {"expired": 0, "deleted": 1, "thinned": 1}
+    left = {s["id"] for s in client.get(f"{API}/snapshots", headers=view_h).json()["items"]}
+    assert left == {ids[1], ids[2], ids[3], ids[4]}  # day 1 keeps its last routine one and the evidence

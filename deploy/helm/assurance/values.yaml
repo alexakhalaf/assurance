@@ -32,6 +32,7 @@ config:
   S3_REGION: us-east-1
   COLLECTOR: live
   SSH_HOST_KEY_POLICY: tofu
+  RETENTION_THIN_AFTER_DAYS: "7"   # then one routine snapshot per day
   RETENTION_DAYS: "90"       # 0 keeps every snapshot; change-labelled ones and the newest are always kept
   # WEBHOOK_ALLOWED_HOSTS: '["hooks.corp.example"]'   # private webhook targets allowed
   TRUSTED_PROXIES: '["10.0.0.0/8"]'   # the ingress controller's pod network

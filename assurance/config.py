@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     # Retention, applied by the scheduler once an hour. 0 = keep forever. Labelled snapshots (change
     # evidence) are kept; "schedule:" labels don't count.
     retention_days: int = 0
+    # After this many days, routine snapshots are thinned to one per day (0: never). Hourly snapshots
+    # of 500 devices are ~0.5M rows each; thinning keeps a year of history affordable.
+    retention_thin_after_days: int = 0
     # Webhooks may not target loopback, link-local (cloud metadata) or private addresses unless listed here
     # (IPs, CIDRs or host names).
     webhook_allowed_hosts: list[str] = []

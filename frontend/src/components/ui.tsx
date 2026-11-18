@@ -130,17 +130,25 @@ export function UTabs<T extends string>({ tabs, value, onChange }: { tabs: { id:
   );
 }
 
-export function BarList({ items, max, onClick, color }: { items: [string, number][]; max?: number; onClick?: (k: string) => void; color?: string }) {
+export function BarList({ items, max, onClick, color, limit = 10 }: { items: [string, number][]; max?: number; onClick?: (k: string) => void; color?: string; limit?: number }) {
   const m = max ?? Math.max(1, ...items.map(([, v]) => v));
+  const shown = items.slice(0, limit);
+  const rest = items.slice(limit);
   return (
     <div className="bar-list">
-      {items.map(([k, v]) => (
+      {shown.map(([k, v]) => (
         <div className="bl-row" key={k}>
           <span className="truncate" title={k}>{onClick ? <a href="#" onClick={(e) => { e.preventDefault(); onClick(k); }}>{k}</a> : k}</span>
           <div className="bl-bar"><span style={{ width: `${(v / m) * 100}%`, background: color }} /></div>
           <span className="num">{v.toLocaleString()}</span>
         </div>
       ))}
+      {rest.length > 0 && (
+        <div className="bl-row muted">
+          <span>{rest.length.toLocaleString()} more</span><span />
+          <span className="num">{rest.reduce((a, [, v]) => a + v, 0).toLocaleString()}</span>
+        </div>
+      )}
     </div>
   );
 }

@@ -192,7 +192,7 @@ export function DataGrid<R = any>(props: Props<R>) {
               <tr key={rowKey(r, i)} className={onRowClick ? "clickable" : ""} onClick={onRowClick ? () => onRowClick(r) : undefined}>
                 {visible.map((c) => (
                   <td key={c.key} className={[c.mono ? "mono" : "", c.num ? "num" : "", c.wrap ? "wrap-cell" : ""].join(" ")}
-                    title={c.text ? c.text(r) : undefined}>
+                    title={c.text ? c.text(r) : c.render ? undefined : plain((r as any)[c.key])}>
                     {c.render ? c.render(r) : fmtCell((r as any)[c.key])}
                   </td>
                 ))}
@@ -217,6 +217,12 @@ export function DataGrid<R = any>(props: Props<R>) {
       </div>
     </div>
   );
+}
+
+function plain(v: any): string | undefined {
+  if (v === null || v === undefined || v === "") return undefined;
+  if (Array.isArray(v)) return v.map((x) => (typeof x === "object" ? JSON.stringify(x) : String(x))).join(", ");
+  return typeof v === "object" ? JSON.stringify(v) : String(v);
 }
 
 export function fmtCell(v: any): ReactNode {

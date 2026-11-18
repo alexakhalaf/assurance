@@ -65,10 +65,10 @@ def maintenance() -> None:
     from .snapshots import reap_stale
 
     reap_stale()
-    days = get_settings().retention_days
-    if days > 0 and time.monotonic() - _last_retention > 3600:
+    s = get_settings()
+    if (s.retention_days > 0 or s.retention_thin_after_days > 0) and time.monotonic() - _last_retention > 3600:
         _last_retention = time.monotonic()
-        prune(days, dry_run=False)
+        prune(s.retention_days, dry_run=False, thin_after_days=s.retention_thin_after_days)
 
 
 def scheduler_loop(interval: float = 20.0) -> None:  # pragma: no cover - long running

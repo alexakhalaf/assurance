@@ -345,7 +345,8 @@ label.inline { display: inline-flex; align-items: center; gap: 6px; color: var(-
 .grid tr.filters-row th { top: 33px; background: var(--surface); padding: 4px 6px; text-transform: none; letter-spacing: 0; z-index: 2; }
 .grid tr.filters-row input, .grid tr.filters-row select { height: 26px; width: 100%; min-width: 70px; font-size: 12px; padding: 0 7px; }
 .grid tr.filters-row select { padding-right: 22px; background-position: calc(100% - 11px) 11px, calc(100% - 7px) 11px; }
-.grid td { padding: 6px 10px; border-bottom: 1px solid var(--line); vertical-align: top; max-width: 520px; }
+.grid td { padding: 6px 10px; border-bottom: 1px solid var(--line); vertical-align: top; max-width: 420px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .grid.comfortable td { padding: 9px 10px; }
 .grid tbody tr:hover td { background: var(--surface-2); }
 .grid tbody tr.clickable { cursor: pointer; }

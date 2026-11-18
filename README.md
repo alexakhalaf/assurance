@@ -203,6 +203,7 @@ All settings are environment variables (or `.env`), prefixed `ASSURANCE_`.
 | `RATE_LIMIT_LOGIN_PER_MINUTE` | `10` | Password login and SSO start/exchange, per client IP |
 | `MAX_REQUEST_BYTES` | `20971520` | Larger request bodies get 413 |
 | `RETENTION_DAYS` | `0` | Scheduler deletes snapshots older than this, hourly. `0` keeps all. Snapshots with any label other than `schedule:…`, and the newest complete one, are always kept |
+| `RETENTION_THIN_AFTER_DAYS` | `0` | Snapshots older than this are thinned to the last routine one per UTC day (evidence is kept). `0` turns it off |
 | `STALE_RUNNING_MINUTES`, `STALE_PENDING_MINUTES` | `30`, `360` | A device collection stuck this long (worker killed, Redis flushed) is marked failed so its snapshot finishes |
 | `WEBHOOK_ALLOWED_HOSTS` | `[]` | Snapshot webhooks to private, loopback or link-local addresses are refused unless the host is listed |
 | `METRICS_TOKEN` | | When set, `/metrics` needs `Authorization: Bearer <token>` |
@@ -235,7 +236,7 @@ All settings are environment variables (or `.env`), prefixed `ASSURANCE_`.
 ```bash
 assurance-admin backup /backups/assurance-$(date +%F).tar     # pg_dump + every referenced stored output
 assurance-admin restore /backups/assurance-2026-11-18.tar      # stop API, workers and scheduler first
-assurance-admin prune --keep-days 90 --apply                   # retention (labelled snapshots are kept)
+assurance-admin prune --keep-days 90 --thin-after-days 7 --apply   # retention (labelled snapshots are kept)
 assurance-admin gc-objects --apply                             # then delete outputs nothing references
 ```
 

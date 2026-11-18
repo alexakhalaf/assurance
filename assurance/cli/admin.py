@@ -136,12 +136,15 @@ def scheduler(interval: float = 20.0):
 
 @app.command()
 def prune(keep_days: int = typer.Option(30, help="Delete unlabelled snapshots older than this"),
-          dry_run: bool = typer.Option(True, "--dry-run/--apply")):
-    """Retention: delete old snapshots. Snapshots with any label are kept (change evidence)."""
+          dry_run: bool = typer.Option(True, "--dry-run/--apply"),
+          thin_after_days: int = typer.Option(0, help="Keep one snapshot per day once older than this")):
+    """Retention: delete old snapshots. Labelled snapshots (change evidence) and the newest are kept."""
     from ..services.retention import prune as do_prune
 
-    r = do_prune(keep_days, dry_run)
+    r = do_prune(keep_days, dry_run, thin_after_days)
     typer.echo(f"{r['expired']} snapshot(s) older than {keep_days} days without labels")
+    if thin_after_days:
+        typer.echo(f"{r['thinned']} more thinned to one per day after {thin_after_days} days")
     if not dry_run:
         typer.echo(f"deleted {r['deleted']}")
     # Raw objects are content-addressed and shared between snapshots: `gc-objects` removes orphans.

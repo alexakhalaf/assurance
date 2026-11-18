@@ -285,12 +285,19 @@ def report_compliance(_: Principal = Depends(viewer), db: Session = Depends(get_
 @router.get("/reports/inventory", tags=["reports"])
 def report_inventory(_: Principal = Depends(viewer), db: Session = Depends(get_db), snapshot: str = "latest",
                      format: str = Query("html", pattern="^(html|csv|xlsx)$")):
-    """Devices with model, serial and OS version, plus every hardware component."""
+    """Devices with model, serial and OS version as collected in the snapshot, plus every hardware component.
+    Inventory fields (host, site, role) come from the current inventory; a device removed since is still
+    listed from the snapshot."""
     snap = _snap(db, snapshot)
-    devices = [{"device": d.name, "host": d.host, "platform": d.platform, "site": d.site.name if d.site else None,
-                "role": d.role, "status": d.status, "model": d.model, "serial": d.serial,
-                "os_version": d.os_version, "last_collected_at": d.last_collected_at}
-               for d in db.scalars(select(Device).order_by(Device.name)).unique()]
+    inv = {d.name: d for d in db.scalars(select(Device)).unique()}
+    facts = dict(db.execute(select(StateRow.device_name, StateRow.data).where(
+        StateRow.snapshot_id == snap.id, StateRow.table_name == "facts", StateRow.key == "device")).all())
+    devices = []
+    for name in sorted(facts):
+        f, d = facts[name], inv.get(name)
+        devices.append({"device": name, "host": d.host if d else None, "platform": d.platform if d else None,
+                        "site": d.site.name if d and d.site else None, "role": d.role if d else None,
+                        "model": f.get("model"), "serial": f.get("serial"), "os_version": f.get("os_version")})
     hw = [{"device": dev, **data} for dev, data in db.execute(
         select(StateRow.device_name, StateRow.data).where(StateRow.snapshot_id == snap.id,
                                                           StateRow.table_name == "hardware")
@@ -299,7 +306,7 @@ def report_inventory(_: Principal = Depends(viewer), db: Session = Depends(get_d
     for d in devices:
         if d["os_version"]:
             versions[f"{d['platform']} {d['os_version']}"] = versions.get(f"{d['platform']} {d['os_version']}", 0) + 1
-    return _render("Inventory", f"Hardware from snapshot {_ts(snap)}",
+    return _render("Inventory", f"Devices and hardware as collected in snapshot {_ts(snap)}",
                    [("Devices", devices), ("Hardware", hw),
                     ("OS versions", [{"version": k, "devices": v} for k, v in sorted(versions.items())])],
                    [("Devices", len(devices)), ("Components", len(hw)), ("OS versions", len(versions))],

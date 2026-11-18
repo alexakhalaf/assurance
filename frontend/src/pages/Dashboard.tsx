@@ -170,13 +170,13 @@ export default function Dashboard() {
             <div style={{ padding: "8px 12px 12px" }}><Chart option={collectionOption} height={200} /></div>}
         </Card>
         <Card className="col-3" title="Platforms">
-          <div style={{ padding: 16 }}><BarList items={Object.entries(data.devices.by_platform) as [string, number][]} /></div>
+          <div style={{ padding: 16 }}><BarList limit={8} items={Object.entries(data.devices.by_platform) as [string, number][]} /></div>
         </Card>
         <Card className="col-3" title="Sites">
-          <div style={{ padding: 16 }}><BarList items={Object.entries(data.devices.by_site) as [string, number][]} /></div>
+          <div style={{ padding: 16 }}><BarList limit={8} items={Object.entries(data.devices.by_site) as [string, number][]} /></div>
         </Card>
         <Card className="col-6" title="Software versions">
-          {Object.keys(data.devices.by_os_version).length ? <div style={{ padding: 16 }}><BarList items={(Object.entries(data.devices.by_os_version) as [string, number][]).slice(0, 12)} color="#8e6bd8" /></div>
+          {Object.keys(data.devices.by_os_version).length ? <div style={{ padding: 16 }}><BarList items={(Object.entries(data.devices.by_os_version) as [string, number][])} color="#8e6bd8" /></div>
             : <EmptyState icon="facts" title="Not learned yet">Versions are learned from the first collection.</EmptyState>}
         </Card>
         <Card className="col-6" title="Recent snapshots" actions={<Link className="btn sm ghost" to="/snapshots">All</Link>}>
