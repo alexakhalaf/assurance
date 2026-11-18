@@ -290,7 +290,7 @@ the dashboard, diff, search, topology, reports and pre/post endpoints under conc
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
-pip install -e '.[dev]'
+pip install -c constraints.txt -e '.[dev]'   # constraints.txt: the exact versions CI and the image use
 export TEST_DATABASE_URL=postgresql+psycopg://postgres@localhost:5432/assurance_test
 pytest                       # needs a PostgreSQL database; uses mock_data and the filesystem store
 ruff check assurance tests

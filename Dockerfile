@@ -8,15 +8,15 @@ RUN npm ci --no-audit --no-fund
 COPY frontend/ ./
 RUN npm run build -- --outDir /ui/dist
 
-FROM python:3.12-slim AS build
+FROM python:3.13-slim AS build
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 WORKDIR /src
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md constraints.txt ./
 COPY assurance/ assurance/
 COPY --from=ui /ui/dist assurance/ui/
-RUN python -m venv /opt/venv && /opt/venv/bin/pip install '.[otel]'
+RUN python -m venv /opt/venv && /opt/venv/bin/pip install -c constraints.txt '.[otel]'
 
-FROM python:3.12-slim
+FROM python:3.13-slim
 LABEL org.opencontainers.image.title="assurance" \
       org.opencontainers.image.description="Network snapshot and change assurance (Cisco IOS-XE / NX-OS)"
 # Unicon drives the system ssh client, so live collection needs openssh-client.
