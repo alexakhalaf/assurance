@@ -156,6 +156,9 @@ def create_app() -> FastAPI:
         return PlainTextResponse(generate_latest().decode(), media_type=CONTENT_TYPE_LATEST)
 
     _mount_ui(app, s.ui_dist)
+    from .. import tracing
+
+    tracing.setup("assurance-api", app)
     return app
 
 

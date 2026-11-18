@@ -39,6 +39,11 @@ def enqueue(func, *args, job_timeout: int = 1800, **kwargs) -> None:
     mode = s.job_backend
     if s.env == "test" and mode == "rq":
         mode = "sync"
+    from . import tracing
+
+    ctx = tracing.carrier()
+    if ctx:  # carry the trace into the job
+        func, args = tracing.run_traced, (func, ctx, *args)
     if mode == "rq":
         get_queue().enqueue(func, *args, job_timeout=job_timeout, **kwargs)
     elif mode == "thread":

@@ -110,24 +110,28 @@ def worker(burst: bool = typer.Option(False, help="Exit when the queue is empty"
     """Run a collection worker (RQ)."""
     from rq import Worker
 
+    from .. import tracing
     from ..config import get_settings
     from ..jobs import get_queue, redis_conn
     from ..logging_setup import configure_logging
 
     s = get_settings()
     configure_logging(s.log_level, s.log_json)
+    tracing.setup("assurance-worker")
     Worker([get_queue()], connection=redis_conn()).work(burst=burst, with_scheduler=False)
 
 
 @app.command()
 def scheduler(interval: float = 20.0):
     """Run the schedule loop (run 1-2 replicas; a Redis lock keeps one active)."""
+    from .. import tracing
     from ..config import get_settings
     from ..logging_setup import configure_logging
     from ..services.schedules import scheduler_loop
 
     s = get_settings()
     configure_logging(s.log_level, s.log_json)
+    tracing.setup("assurance-scheduler")
     scheduler_loop(interval)
 
 

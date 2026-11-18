@@ -188,7 +188,19 @@ All settings are environment variables (or `.env`), prefixed `ASSURANCE_`.
 | `OIDC_DEFAULT_ROLE` | `none` | Role for users with no mapped group; `none` refuses them |
 | `OIDC_GROUPS_CLAIM`, `OIDC_USERNAME_CLAIM` | `groups`, `preferred_username` | |
 | `OIDC_DISPLAY_NAME` | `Single sign-on` | Button text on the login page |
+| `OTEL_ENDPOINT` | | OTLP/HTTP collector, e.g. `http://otel-collector:4318`. Turns on tracing (image includes the `otel` extra) |
+| `OTEL_SAMPLE_RATIO` | `1.0` | Fraction of new traces kept; child spans follow the parent's decision |
 | `LOCAL_LOGIN` | `true` | `false` leaves SSO as the only way to sign in (API tokens still work) |
+
+## Observability
+
+- `/metrics` (Prometheus): API requests and latency per route, collections and their duration per
+  platform, parser warnings per command, snapshots, devices by status, rate-limited requests.
+- JSON logs with `request_id`, plus `trace_id` when tracing is on.
+- OpenTelemetry tracing (`ASSURANCE_OTEL_ENDPOINT`): one trace per snapshot request covers the API call,
+  each worker's device collection (`device commands`, `genie parse`), every SQL statement (text only,
+  never parameters) and `finalize snapshot`. Works with Tempo, Jaeger, Honeycomb or any OTLP backend.
+- `/healthz` (process up) and `/readyz` (database, Redis and object store reachable).
 
 ## Backup and restore
 
@@ -267,8 +279,8 @@ From the architecture doc's release plan:
 - **0.5 beta (this release):** BGP, OSPF, MAC, VLANs, VRFs, port-channels, STP, HSRP/VRRP, NTP,
   hardware, configs, intent checks, topology, pre/post verification, reports, SSH host key pinning.
   Check profiles name the checks a type of change must pass (picked by change label prefix).
-- **1.0 GA:** OIDC SSO, rate limiting and hardening, backup/restore (done); HA deployment (Helm),
-  OpenTelemetry tracing, pen test.
+- **1.0 GA:** OIDC SSO, rate limiting and hardening, backup/restore, OpenTelemetry tracing (done);
+  HA deployment (Helm), load test, pen test.
 
 Known gaps: the live collector has not been run against real devices yet (mock data only); IOS-XE
 collects the global routing table only (no per-VRF commands yet); no IPv6; no reachability check

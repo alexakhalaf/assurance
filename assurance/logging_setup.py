@@ -21,6 +21,11 @@ class JsonFormatter(logging.Formatter):
         rid = request_id.get()
         if rid:
             doc["request_id"] = rid
+        from .tracing import current_trace_id
+
+        tid = current_trace_id()
+        if tid:
+            doc["trace_id"] = tid
         for k in ("snapshot_id", "device", "job_id"):
             if hasattr(record, k):
                 doc[k] = getattr(record, k)

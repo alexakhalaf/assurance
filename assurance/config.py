@@ -60,6 +60,10 @@ class Settings(BaseSettings):
 
     # Webhooks
     webhook_secret: str | None = Field(default=None, repr=False)
+    # OpenTelemetry tracing (needs the `otel` extra). OTLP/HTTP collector base URL, e.g. http://otel:4318
+    otel_endpoint: str | None = None
+    otel_sample_ratio: float = Field(default=1.0, ge=0, le=1)
+    otel_service_namespace: str = "assurance"
     # OIDC single sign-on (authorization code + PKCE). Enabled when issuer and client id are set.
     oidc_issuer: str | None = None
     oidc_client_id: str | None = None

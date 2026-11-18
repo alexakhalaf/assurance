@@ -14,7 +14,7 @@ WORKDIR /src
 COPY pyproject.toml README.md ./
 COPY assurance/ assurance/
 COPY --from=ui /ui/dist assurance/ui/
-RUN python -m venv /opt/venv && /opt/venv/bin/pip install .
+RUN python -m venv /opt/venv && /opt/venv/bin/pip install '.[otel]'
 
 FROM python:3.12-slim
 LABEL org.opencontainers.image.title="assurance" \

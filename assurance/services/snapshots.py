@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from .. import jobs, metrics
+from .. import jobs, metrics, tracing
 from ..collection import hostkeys
 from ..collection.collectors import LiveCollector, MockCollector
 from ..collection.commands import COMMANDS, all_commands
@@ -120,6 +120,11 @@ def _verify_host_key(db: Session, device: Device) -> hostkeys.HostKey | None:
 
 def run_device_collection(collection_id: int) -> None:
     """Worker entry point: collect, parse, store one device for one snapshot."""
+    with tracing.span("collect device", collection_id=collection_id):
+        _run_device_collection(collection_id)
+
+
+def _run_device_collection(collection_id: int) -> None:
     s = get_settings()
     with session_scope() as db:
         dc = db.get(DeviceCollection, collection_id)
@@ -142,9 +147,13 @@ def run_device_collection(collection_id: int) -> None:
                 raise RuntimeError("device was deleted from inventory")
             platform = device.platform
             target = Target(device.name, device.host, device.platform, device.port, device.protocol)
+            tracing.annotate(snapshot=snapshot_id, device=device_name, platform=platform, collector=s.collector)
             collector = _collector_for(snap, device, db)
-            raw = sanitize_raw(target, collector.collect(target))
-            genie, norm, warnings = parse_device(target, raw)
+            with tracing.span("device commands", device=device_name):
+                raw = sanitize_raw(target, collector.collect(target))
+            with tracing.span("genie parse", device=device_name, commands=len(raw)):
+                genie, norm, warnings = parse_device(target, raw)
+            tracing.annotate(parser_warnings=len(warnings))
             for w in warnings:
                 metrics.PARSER_WARNINGS.labels(platform, w.split(":", 1)[0]).inc()
 
@@ -176,6 +185,7 @@ def run_device_collection(collection_id: int) -> None:
             dc.status, dc.warnings, dc.row_counts = status, warnings, counts
             device.last_collected_at, device.last_collection_status = utcnow(), status
     except Exception as e:
+        tracing.error(e)
         log.warning("collection failed for %s: %s", device_name, e,
                     extra={"snapshot_id": snapshot_id, "device": device_name})
         if isinstance(e, hostkeys.HostKeyError):
@@ -228,6 +238,11 @@ def maybe_finalize(snapshot_id: str) -> None:
 
 
 def finalize(snapshot_id: str) -> None:
+    with tracing.span("finalize snapshot", snapshot=snapshot_id):
+        _finalize(snapshot_id)
+
+
+def _finalize(snapshot_id: str) -> None:
     with session_scope() as db:
         snap = db.get(Snapshot, snapshot_id)
         statuses = [c.status for c in snap.collections]
