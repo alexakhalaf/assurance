@@ -210,6 +210,16 @@ def cdp(g: dict) -> dict:
     return out
 
 
+# Genie title-cases every LLDP port id, which mangles names other vendors write in lower case
+# (Juniper "ge-0/0/0" -> "Ge-0/0/0", ESXi "vmnic0" -> "Vmnic0"). Undo it for those known families.
+_LOWER_PORT = re.compile(r"^(?:(?:Ge|Xe|Et|Fe)-\d|(?:Ae|Em|Fxp|Vmnic|Ens|Eno|Enp|Bond)\d|Irb\b)")
+
+
+def _lldp_port(name):
+    name = expand_ifname(name)
+    return name[0].lower() + name[1:] if name and _LOWER_PORT.match(name) else name
+
+
 def lldp(g: dict) -> dict:
     out = {}
     for ifname, i in (g or {}).get("interfaces", {}).items():
@@ -221,7 +231,7 @@ def lldp(g: dict) -> dict:
                     "protocol": "lldp",
                     "local_interface": local,
                     "remote_device": remote,
-                    "remote_interface": expand_ifname(n.get("port_id") or port_id),
+                    "remote_interface": _lldp_port(n.get("port_id") or port_id),
                     "remote_platform": n.get("system_description") or None,
                     "mgmt_ip": n.get("management_address") or n.get("management_address_v4"),
                 }

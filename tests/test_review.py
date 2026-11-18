@@ -285,3 +285,15 @@ def test_config_search_runs_in_the_database(client, two_snapshots, view_h):
     assert capped["total"] == 1 and capped["truncated"] is True
     # a classic catastrophic-backtracking pattern returns promptly instead of pinning an API worker
     assert search(pattern="(a+)+$", regex=True).status_code == 200
+
+
+def test_lldp_keeps_lower_case_non_cisco_port_names():
+    from assurance.collection.normalize import _lldp_port
+    assert _lldp_port("Ge-0/0/0") == "ge-0/0/0"
+    assert _lldp_port("Xe-1/0/3") == "xe-1/0/3"
+    assert _lldp_port("Vmnic0") == "vmnic0"
+    assert _lldp_port("Ae12") == "ae12"
+    assert _lldp_port("Gi0/1") == "GigabitEthernet0/1"
+    assert _lldp_port("Et1/1") == "Ethernet1/1"
+    assert _lldp_port("Ethernet1/2") == "Ethernet1/2"
+    assert _lldp_port(None) is None
