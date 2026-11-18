@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   backend:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: postgres:16-alpine
@@ -25,11 +25,16 @@ jobs:
     env:
       TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/assurance_test
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
           cache: pip
+      # pg_dump/pg_restore must match the server (16), as in the image; a newer client writes
+      # settings a 16 server rejects.
+      - run: |
+          sudo apt-get install -y --no-install-recommends postgresql-client-16
+          echo /usr/lib/postgresql/16/bin >> "$GITHUB_PATH"
       - run: pip install -c constraints.txt -e '.[dev]' pip-audit
       - run: ruff check assurance tests
       - run: pytest --cov --cov-report=term-missing --cov-fail-under=80
@@ -43,13 +48,13 @@ jobs:
           --ignore-vuln PYSEC-2026-3447 --ignore-vuln GHSA-xmj3-9gf7-h52w
 
   frontend:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: "22"
           cache: npm
@@ -58,23 +63,22 @@ jobs:
       - run: npm run build
 
   image:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [backend, frontend]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: docker build -t assurance:ci .
+      # Trivy's own image, pinned by digest (the trivy-action 0.28.0 tag no longer resolves).
       - name: Scan image
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          image-ref: assurance:ci
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          exit-code: "1"
-          trivyignores: .trivyignore
+        run: >-
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/src:ro"
+          aquasec/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
+          image --skip-version-check --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1
+          --ignorefile /src/.trivyignore assurance:ci
 
   e2e:
     # The real UI in a browser against the real API, seeded with the two mock lab snapshots.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [frontend]
     services:
       postgres:
@@ -97,12 +101,12 @@ jobs:
       ASSURANCE_COLLECT_JITTER_SECONDS: "0"
       ASSURANCE_BOOTSTRAP_ADMIN_PASSWORD: e2e-admin-password
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
           cache: pip
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "22"
           cache: npm
@@ -118,26 +122,30 @@ jobs:
         run: tail -200 api.log
 
   proxy:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Validate the Caddy TLS config and the Compose file
         run: |
+          # Caddy loads the certificate files while validating, so give it a throwaway pair.
+          mkdir -p /tmp/tls && openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=assurance.example.net \
+            -keyout /tmp/tls/key.pem -out /tmp/tls/cert.pem && chmod 644 /tmp/tls/*.pem
           for tls in internal "/run/tls/cert.pem /run/tls/key.pem" ops@example.net; do
             docker run --rm -e ASSURANCE_HOSTNAME=assurance.example.net -e "ASSURANCE_TLS=$tls" \
-              -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2.8-alpine \
+              -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" -v /tmp/tls:/run/tls:ro caddy:2.8-alpine \
               caddy adapt --config /etc/caddy/Caddyfile --validate > /dev/null
           done
           cp .env.example .env && echo ASSURANCE_HOSTNAME=assurance.example.net >> .env
           docker compose config -q
 
   helm:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
-        with:
-          version: v3.16.4
+      - uses: actions/checkout@v5
+      - name: Install Helm v3.16.4
+        run: |
+          curl -fsSL https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz | tar -xz -C /tmp
+          sudo install /tmp/linux-amd64/helm /usr/local/bin/helm
       - name: Lint and render
         run: |
           C=deploy/helm/assurance

@@ -9,6 +9,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import tarfile
@@ -48,6 +49,23 @@ def _tool(name: str, pg_bin: str | None) -> str:
     if not exe:
         raise BackupError(f"{name} not found; install the PostgreSQL client tools matching the server version")
     return exe
+
+
+def _client_major(exe: str) -> int | None:
+    m = re.search(r"(\d+)(?:\.\d+)?", subprocess.run([exe, "--version"], capture_output=True,  # noqa: S603  fixed argv
+                                                        text=True).stdout)
+    return int(m.group(1)) if m else None
+
+
+def _check_client(exe: str) -> None:
+    """pg_restore newer than the server writes settings the server rejects (17 sends
+    transaction_timeout to 16): fail up front with a message that says what to do."""
+    with get_engine().connect() as c:
+        server = int(c.execute(text("SHOW server_version_num")).scalar()) // 10000
+    client = _client_major(exe)
+    if client and client > server:
+        raise BackupError(f"{exe} is PostgreSQL {client} but the server is {server}; use the client tools for "
+                          f"{server} (the Assurance image has them, or pass --pg-bin)")
 
 
 def _revision() -> str | None:
@@ -141,7 +159,9 @@ def restore(archive: Path, objects: bool = True, pg_bin: str | None = None) -> d
         dump = Path(d) / "db.dump"
         dump.write_bytes(data)
         get_engine().dispose()  # drop pooled connections that would hold locks
-        r = subprocess.run([_tool("pg_restore", pg_bin), "--clean", "--if-exists", "--no-owner", "--no-acl",  # noqa: S603  fixed argv, no shell
+        exe = _tool("pg_restore", pg_bin)
+        _check_client(exe)
+        r = subprocess.run([exe, "--clean", "--if-exists", "--no-owner", "--no-acl",  # noqa: S603  fixed argv, no shell
                             "--single-transaction", "--exit-on-error", f"--dbname={dsn}", str(dump)],
                            env=env, capture_output=True, text=True)
         if r.returncode:
