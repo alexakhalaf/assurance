@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ...db import get_db
-from ...models import CheckResult, CheckRule, Snapshot
+from ...models import CheckProfile, CheckResult, CheckRule, Snapshot
 from ...services import audit
 from ...services.checks import (
     BUILTIN,
@@ -19,8 +19,10 @@ from ...services.checks import (
     custom_rule,
     evaluate,
     prepost,
+    profile_for_label,
     run_snapshot_checks,
     validate_definition,
+    validate_profile_rules,
 )
 from ...services.diff import DIFFABLE, SnapshotNotFound, resolve_ref
 from ..deps import Principal, admin, client_ip, operator, viewer
@@ -58,7 +60,25 @@ class PrePostIn(BaseModel):
     pre: str | None = Field(default=None, description="Pre-change snapshot ref")
     post: str | None = Field(default=None, description="Post-change snapshot ref")
     label: str | None = Field(default=None, description="Use the first and last snapshot with this label")
+    profile: str | None = Field(default=None, description="Check profile; by default picked from the label")
+    route_drop_pct: float | None = Field(default=None, ge=0, le=100, description="Overrides the profile (default 2)")
+
+
+class ProfileIn(BaseModel):
+    name: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9._-]*$")
+    description: str | None = Field(default=None, max_length=512)
+    rules: list[str] = Field(default=[], description="Rule ids; empty means every active rule")
+    label_prefix: str | None = Field(default=None, max_length=128, description="e.g. change:fw- picks this profile")
     route_drop_pct: float = Field(default=2.0, ge=0, le=100)
+    strict: bool = Field(default=False, description="Warnings fail the verification too")
+
+
+class ProfilePatch(BaseModel):
+    description: str | None = None
+    rules: list[str] | None = None
+    label_prefix: str | None = None
+    route_drop_pct: float | None = Field(default=None, ge=0, le=100)
+    strict: bool | None = None
 
 
 def _definition(defn: dict | None, text: str | None) -> dict:
@@ -225,7 +245,69 @@ def compare_prepost(body: PrePostIn, _: Principal = Depends(viewer), db: Session
         pre, post = _snap(db, body.pre), _snap(db, body.post)
     if pre.created_at > post.created_at:
         pre, post = post, pre
-    return prepost(db, pre, post, route_drop_pct=body.route_drop_pct)
+    if body.profile:
+        prof = db.scalar(select(CheckProfile).where(CheckProfile.name == body.profile))
+        if prof is None:
+            raise HTTPException(404, f"no check profile {body.profile!r}")
+    else:
+        prof = profile_for_label(db, body.label or next(iter(post.labels or []), None))
+    return prepost(db, pre, post, route_drop_pct=body.route_drop_pct, profile=prof)
+
+
+def _profile_out(p: CheckProfile) -> dict:
+    return {"name": p.name, "description": p.description, "rules": p.rules, "label_prefix": p.label_prefix,
+            "route_drop_pct": p.route_drop_pct, "strict": p.strict, "created_by": p.created_by,
+            "updated_at": p.updated_at}
+
+
+def _rules_ok(db: Session, rules: list[str]) -> list[str]:
+    try:
+        return validate_profile_rules(db, rules)
+    except RuleError as e:
+        raise HTTPException(422, str(e)) from e
+
+
+@router.get("/checks/profiles")
+def list_profiles(_: Principal = Depends(viewer), db: Session = Depends(get_db)):
+    return [_profile_out(p) for p in db.scalars(select(CheckProfile).order_by(CheckProfile.name))]
+
+
+@router.post("/checks/profiles", status_code=201)
+def create_profile(body: ProfileIn, request: Request, p: Principal = Depends(admin), db: Session = Depends(get_db)):
+    if db.scalar(select(CheckProfile).where(CheckProfile.name == body.name)):
+        raise HTTPException(409, "A profile with this name exists")
+    row = CheckProfile(**{**body.model_dump(), "rules": _rules_ok(db, body.rules)}, created_by=p.name)
+    db.add(row)
+    audit.record(db, p.name, "check.profile.create", body.name, body.model_dump(), client_ip(request))
+    db.commit()
+    return _profile_out(row)
+
+
+@router.patch("/checks/profiles/{name}")
+def update_profile(name: str, body: ProfilePatch, request: Request, p: Principal = Depends(admin),
+                   db: Session = Depends(get_db)):
+    row = db.scalar(select(CheckProfile).where(CheckProfile.name == name))
+    if row is None:
+        raise HTTPException(404, "Profile not found")
+    data = body.model_dump(exclude_unset=True)
+    if data.get("rules") is not None:
+        data["rules"] = _rules_ok(db, data["rules"])
+    for k, v in data.items():
+        setattr(row, k, v if k != "label_prefix" else (v or None))
+    audit.record(db, p.name, "check.profile.update", name, {"fields": sorted(data)}, client_ip(request))
+    db.commit()
+    return _profile_out(row)
+
+
+@router.delete("/checks/profiles/{name}", status_code=204)
+def delete_profile(name: str, request: Request, p: Principal = Depends(admin), db: Session = Depends(get_db)):
+    row = db.scalar(select(CheckProfile).where(CheckProfile.name == name))
+    if row is None:
+        raise HTTPException(404, "Profile not found")
+    db.delete(row)
+    audit.record(db, p.name, "check.profile.delete", name, ip=client_ip(request))
+    db.commit()
+    return Response(status_code=204)
 
 
 __all__ = ["router", "SEVERITIES"]

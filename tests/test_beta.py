@@ -176,3 +176,31 @@ def test_l2_checks(client, two_snapshots, view_h):
     assert [v["key"] for v in r["fhrp-state-changed"]["violations"]] == ["Vlan100|hsrp|10"]
     assert r["stp-root-changed"]["status"] == "pass"
     assert "new:ntp-synchronized" in r
+
+
+def test_check_profiles(client, two_snapshots, admin_h, view_h):
+    base = {"pre": two_snapshots[0], "post": two_snapshots[1]}
+    # A routing-change profile that only cares about BGP and OSPF; the OSPF loss still fails it.
+    r = client.post(f"{API}/checks/profiles", json={"name": "routing", "rules": ["bgp-neighbor-lost",
+                    "ospf-neighbor-lost", "bgp-established"], "label_prefix": "test:"}, headers=admin_h)
+    assert r.status_code == 201, r.text
+    assert client.post(f"{API}/checks/profiles", json={"name": "bad", "rules": ["nope"]},
+                       headers=admin_h).status_code == 422
+    assert client.post(f"{API}/checks/profiles", json={"name": "x"}, headers=view_h).status_code == 403
+    res = client.post(f"{API}/compare/prepost", json={**base, "profile": "routing"}, headers=view_h).json()
+    assert set(res["checks"]) == {"bgp-neighbor-lost", "ospf-neighbor-lost"}  # bgp-established: nothing new
+    assert res["result"] == "fail" and res["profile"]["name"] == "routing"
+    # Picked automatically from the post snapshot's label prefix ("test:t2")
+    auto = client.post(f"{API}/compare/prepost", json=base, headers=view_h).json()
+    assert auto["profile"]["name"] == "routing"
+    # A cosmetic-change profile limited to neighbor loss: warnings only, strict turns them into a fail
+    client.post(f"{API}/checks/profiles", json={"name": "cosmetic", "rules": ["neighbor-lost"]}, headers=admin_h)
+    soft = client.post(f"{API}/compare/prepost", json={**base, "profile": "cosmetic"}, headers=view_h).json()
+    assert soft["result"] == "warning"
+    client.patch(f"{API}/checks/profiles/cosmetic", json={"strict": True}, headers=admin_h)
+    hard = client.post(f"{API}/compare/prepost", json={**base, "profile": "cosmetic"}, headers=view_h).json()
+    assert hard["result"] == "fail"
+    assert client.post(f"{API}/compare/prepost", json={**base, "profile": "missing"},
+                       headers=view_h).status_code == 404
+    assert [p["name"] for p in client.get(f"{API}/checks/profiles", headers=view_h).json()] == ["cosmetic", "routing"]
+    assert client.delete(f"{API}/checks/profiles/cosmetic", headers=admin_h).status_code == 204

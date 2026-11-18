@@ -136,7 +136,8 @@ Authenticate with `Authorization: Bearer <token>`: create a token under Settings
 | `GET /stats/overview` | Dashboard numbers |
 | `GET/POST /checks/rules`, `PATCH/DELETE /checks/rules/{id}`, `POST /checks/rules/test` | Intent rules (admin to change) |
 | `GET /snapshots/{ref}/checks`, `POST /checks/run`, `GET /checks/trend` | Violations, re-grade, trend |
-| `POST /compare/prepost` | Change verification: `{pre, post}` or `{label}`, plus `route_drop_pct` |
+| `POST /compare/prepost` | Change verification: `{pre, post}` or `{label}`, plus `profile` and `route_drop_pct` |
+| `GET/POST /checks/profiles`, `PATCH/DELETE /checks/profiles/{name}` | Check profiles: `{name, rules, label_prefix, route_drop_pct, strict}` |
 | `GET /topology?compare=&site=` | Nodes and links, with link changes |
 | `GET /diffs/config?device=&from=&to=`, `GET /devices/{name}/config` | Config diff and masked config |
 | `GET /reports/{changes,compliance,inventory}?format=html\|csv\|xlsx` | Reports |
@@ -230,7 +231,7 @@ From the architecture doc's release plan:
 
 - **0.5 beta (this release):** BGP, OSPF, MAC, VLANs, VRFs, port-channels, STP, HSRP/VRRP, NTP,
   hardware, configs, intent checks, topology, pre/post verification, reports, SSH host key pinning.
-  Still to do: check profiles per change type (which rules a given change must pass).
+  Check profiles name the checks a type of change must pass (picked by change label prefix).
 - **1.0 GA:** HA deployment (Helm), OIDC SSO, backup/restore, OpenTelemetry tracing, hardening and pen test.
 
 Known gaps: the live collector has not been run against real devices yet (mock data only); IOS-XE

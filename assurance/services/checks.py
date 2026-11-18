@@ -526,13 +526,47 @@ def _per_device(result: dict) -> dict[str, dict]:
     return dict(out)
 
 
-def prepost(db: Session, pre: Snapshot, post: Snapshot, route_drop_pct: float = 2.0) -> dict:
-    """Change verification: delta rules between pre and post, plus state failures new in post."""
+def profile_for_label(db: Session, label: str | None):
+    """The profile whose label_prefix is the longest prefix of label, if any."""
+    from ..models import CheckProfile
+
+    if not label:
+        return None
+    best = None
+    for p in db.scalars(select(CheckProfile).where(CheckProfile.label_prefix.is_not(None))):
+        if label.startswith(p.label_prefix) and (best is None or len(p.label_prefix) > len(best.label_prefix)):
+            best = p
+    return best
+
+
+def validate_profile_rules(db: Session, rules: list[str]) -> list[str]:
+    known = {r.id for r in BUILTIN} | {f"custom:{n}" for n in db.scalars(
+        select(CheckRule.name).where(CheckRule.kind == "custom"))}
+    bad = sorted(set(rules) - known)
+    if bad:
+        raise RuleError(f"unknown rule(s): {', '.join(bad)}")
+    return sorted(set(rules))
+
+
+def prepost(db: Session, pre: Snapshot, post: Snapshot, route_drop_pct: float | None = None,
+            profile=None) -> dict:
+    """Change verification: delta rules between pre and post, plus state failures new in post.
+
+    With a profile, only its rules are evaluated, its route-drop threshold applies (unless one is
+    given), and in strict mode warnings fail the verification as well.
+    """
     from .diff import diff_snapshots
 
+    wanted = set(profile.rules) if profile is not None and profile.rules else None
+    if route_drop_pct is None:
+        route_drop_pct = profile.route_drop_pct if profile is not None else 2.0
+
+    def pick(kind):
+        return [r for r in active_rules(db, kind) if wanted is None or r.id in wanted]
+
     s_pre, s_post = SnapshotData(db, pre), SnapshotData(db, post)
-    delta = evaluate(active_rules(db, "delta"), s_post, prev=s_pre, threshold_pct=route_drop_pct)
-    state_rules = active_rules(db, "state")
+    delta = evaluate(pick("delta"), s_post, prev=s_pre, threshold_pct=route_drop_pct)
+    state_rules = pick("state")
     before = evaluate(state_rules, s_pre)
     after = evaluate(state_rules, s_post)
     new_failures = {}
@@ -546,8 +580,11 @@ def prepost(db: Session, pre: Snapshot, post: Snapshot, route_drop_pct: float = 
     warns = sum(len(r["violations"]) for r in checks.values() if r["severity"] == WARNING)
     d = diff_snapshots(db, pre, post)
     missing = sorted(s_pre.collected - s_post.collected)
+    strict = bool(profile is not None and profile.strict)
     return {
-        "result": "fail" if fails or missing else ("warning" if warns else "pass"),
+        "result": "fail" if fails or missing or (strict and warns) else ("warning" if warns else "pass"),
+        "profile": {"name": profile.name, "strict": strict, "rules": sorted(wanted) if wanted else "all",
+                    "route_drop_pct": route_drop_pct} if profile is not None else None,
         "pre": {"id": pre.id, "created_at": pre.created_at.isoformat(), "labels": pre.labels},
         "post": {"id": post.id, "created_at": post.created_at.isoformat(), "labels": post.labels},
         "fail": fails, "warning": warns,

@@ -6,6 +6,10 @@ import { axisStyle, Chart } from "../components/Chart";
 import { Badge, Card, Empty, ErrorNote, Modal, PageHeader, Stat } from "../components/ui";
 import { fmtTime, useApi } from "../hooks";
 
+interface Profile {
+  name: string; description: string | null; rules: string[]; label_prefix: string | null; route_drop_pct: number; strict: boolean;
+}
+
 interface Rule {
   id: string; name: string; description: string | null; severity: string; kind: string; builtin: boolean;
   enabled: boolean; tables?: string[]; definition?: any; latest?: CheckSummary | null;
@@ -35,6 +39,8 @@ export default function Checks() {
   const params = useMemo(() => ({ rule: sel || undefined, severity: severity || undefined, device: device || undefined }), [sel, severity, device]);
   const viol = useApi<{ snapshot: string; created_at: string; summary: any; violations: Violation[] }>("/snapshots/latest/checks", params);
   const [editing, setEditing] = useState<Rule | "new" | null>(null);
+  const profiles = useApi<Profile[]>("/checks/profiles");
+  const [editProfile, setEditProfile] = useState<Profile | "new" | null>(null);
   const [busy, setBusy] = useState(false);
 
   async function toggle(r: Rule) {
@@ -113,6 +119,21 @@ export default function Checks() {
           {(trend.data?.length || 0) < 2 ? <Empty>The trend appears after two graded snapshots.</Empty> : <Chart option={trendOption} height={220} />}
         </Card>
       </div>
+      <Card title="Check profiles" actions={can("admin") && <button className="btn sm" onClick={() => setEditProfile("new")}>New profile</button>}>
+        <p className="muted" style={{ marginTop: 0 }}>A profile names the checks a type of change must pass. Change verification picks it from the change label, or you choose it.</p>
+        {(profiles.data || []).length === 0 ? <Empty>No profiles yet: change verification runs every active check.</Empty> : (
+          <table className="tbl dense">
+            <thead><tr><th>Profile</th><th>Change label</th><th>Checks</th><th>Route drop</th><th>Strict</th><th></th></tr></thead>
+            <tbody>{profiles.data!.map((p) => (
+              <tr key={p.name}><td><strong>{p.name}</strong>{p.description && <div className="muted">{p.description}</div>}</td>
+                <td className="mono">{p.label_prefix ? `${p.label_prefix}…` : "—"}</td>
+                <td>{p.rules.length ? p.rules.map((r) => <span key={r} className="tag">{r}</span>) : "all active"}</td>
+                <td>{p.route_drop_pct}%</td><td>{p.strict ? "yes" : "no"}</td>
+                <td>{can("admin") && <button className="btn sm ghost" onClick={() => setEditProfile(p)}>Edit</button>}</td></tr>
+            ))}</tbody>
+          </table>
+        )}
+      </Card>
       <Card title={<>Violations {sel && <span className="tag">{sel}</span>} {viol.data && <span className="muted">· snapshot {fmtTime(viol.data.created_at)}</span>}</>}
         actions={<>
           <select value={severity} onChange={(e) => setSeverity(e.target.value)}>
@@ -123,6 +144,8 @@ export default function Checks() {
         </>}>
         <ViolationTable rows={viol.data?.violations || []} />
       </Card>
+      {editProfile && <ProfileEditor profile={editProfile === "new" ? null : editProfile} rules={list}
+        onClose={() => setEditProfile(null)} onSaved={() => { setEditProfile(null); profiles.reload(); }} />}
       {editing && <RuleEditor rule={editing === "new" ? null : editing} onClose={() => setEditing(null)}
         onSaved={() => { setEditing(null); regrade(); }} />}
     </>
@@ -211,6 +234,68 @@ function RuleEditor({ rule, onClose, onSaved }: { rule: Rule | null; onClose: ()
           {rule && <button className="btn danger" onClick={remove}>Delete</button>}
           <button className="btn" onClick={run}>Test against latest</button>
           <button className="btn primary" disabled={!rule && !name} onClick={save}>Save</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+const TEMPLATES: Record<string, string[]> = {
+  "Routing change": ["bgp-neighbor-lost", "ospf-neighbor-lost", "route-count-drop", "bgp-established", "ospf-full"],
+  "Switching / L2 change": ["interface-went-down", "portchannel-member-lost", "stp-root-changed", "fhrp-state-changed", "neighbor-lost"],
+  "Firmware upgrade": [],
+};
+
+function ProfileEditor({ profile, rules, onClose, onSaved }: { profile: Profile | null; rules: Rule[]; onClose: () => void; onSaved: () => void }) {
+  const [name, setName] = useState(profile?.name || "");
+  const [description, setDescription] = useState(profile?.description || "");
+  const [prefix, setPrefix] = useState(profile?.label_prefix || "");
+  const [pct, setPct] = useState(profile?.route_drop_pct ?? 2);
+  const [strict, setStrict] = useState(profile?.strict || false);
+  const [chosen, setChosen] = useState<Set<string>>(new Set(profile?.rules || []));
+  const [err, setErr] = useState<string | null>(null);
+  const toggle = (id: string) => setChosen((c) => { const n = new Set(c); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+
+  async function save() {
+    setErr(null);
+    const body = { description: description || null, rules: [...chosen], label_prefix: prefix || null, route_drop_pct: pct, strict };
+    try {
+      if (profile) await api(`/checks/profiles/${profile.name}`, { method: "PATCH", body: JSON.stringify(body) });
+      else await api("/checks/profiles", { method: "POST", body: JSON.stringify({ name, ...body }) });
+      onSaved();
+    } catch (e: any) { setErr(e.message); }
+  }
+  async function remove() {
+    if (!profile || !confirm(`Delete profile ${profile.name}?`)) return;
+    await api(`/checks/profiles/${profile.name}`, { method: "DELETE" });
+    onSaved();
+  }
+  return (
+    <Modal title={profile ? `Edit profile ${profile.name}` : "New check profile"} onClose={onClose}>
+      <div className="form">
+        {!profile && <div className="row gap wrap"><span className="muted">Start from:</span>
+          {Object.entries(TEMPLATES).map(([t, ids]) => <button key={t} className="btn sm" onClick={() => setChosen(new Set(ids))}>{t}</button>)}</div>}
+        <div className="form-grid">
+          <label>Name<input value={name} disabled={!!profile} onChange={(e) => setName(e.target.value)} placeholder="routing-change" /></label>
+          <label>Change label prefix<input value={prefix} onChange={(e) => setPrefix(e.target.value)} placeholder="change:rtg-" /></label>
+          <label>Description<input value={description} onChange={(e) => setDescription(e.target.value)} /></label>
+          <label>Route drop threshold (%)<input type="number" min={0} max={100} step={0.5} value={pct} onChange={(e) => setPct(+e.target.value)} /></label>
+        </div>
+        <label className="inline"><input type="checkbox" checked={strict} onChange={(e) => setStrict(e.target.checked)} /> Strict: warnings fail the verification too</label>
+        <div>
+          <div className="muted" style={{ marginBottom: 6 }}>Checks ({chosen.size ? `${chosen.size} selected` : "none selected = all active checks"})</div>
+          <div className="tbl-wrap" style={{ maxHeight: 300 }}>
+            <table className="tbl dense"><tbody>{rules.map((r) => (
+              <tr key={r.id}><td><input type="checkbox" checked={chosen.has(r.id)} onChange={() => toggle(r.id)} aria-label={r.id} /></td>
+                <td><strong>{r.name}</strong> <span className="mono muted">{r.id}</span></td>
+                <td className="muted">{r.kind === "delta" ? "pre/post" : "state"} · {r.severity}</td></tr>
+            ))}</tbody></table>
+          </div>
+        </div>
+        <ErrorNote error={err} />
+        <div className="row gap end">
+          {profile && <button className="btn danger" onClick={remove}>Delete</button>}
+          <button className="btn primary" disabled={!profile && !name} onClick={save}>Save</button>
         </div>
       </div>
     </Modal>

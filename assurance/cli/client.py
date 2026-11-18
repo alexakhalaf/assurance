@@ -365,6 +365,14 @@ def checks_rules():
            ["id", "severity", "enabled", "latest", "violations", "name"])
 
 
+@checks_app.command("profiles")
+def checks_profiles():
+    """List check profiles (which checks each type of change must pass)."""
+    rows = api().get("/checks/profiles").json()
+    _table([{**p, "rules": len(p["rules"]) or "all", "strict": p["strict"]} for p in rows],
+           ["name", "label_prefix", "rules", "route_drop_pct", "strict", "description"])
+
+
 @checks_app.command("show")
 def checks_show(ref: str = typer.Argument("latest"), rule: str = None, device: str = None,
                 severity: str = typer.Option(None, help="fail | warning"),
@@ -394,16 +402,22 @@ def checks_run(ref: str = typer.Argument("latest")):
 def prepost(pre: str = typer.Option(None, help="Pre-change snapshot ref"),
             post: str = typer.Option(None, help="Post-change snapshot ref"),
             label: str = typer.Option(None, help="Use the first and last snapshot carrying this label"),
-            route_drop_pct: float = typer.Option(2.0, help="Fail when a VRF loses more than this % of routes"),
+            profile: str = typer.Option(None, help="Check profile (default: picked from the change label)"),
+            route_drop_pct: float = typer.Option(None, help="Fail when a VRF loses more than this % of routes "
+                                                            "(default: the profile's, else 2)"),
             as_json: bool = typer.Option(False, "--json")):
     """Pre/post change verification. Exits 5 when verification fails."""
-    body = {"pre": pre, "post": post, "label": label, "route_drop_pct": route_drop_pct}
+    body = {"pre": pre, "post": post, "label": label, "profile": profile, "route_drop_pct": route_drop_pct}
     r = api().post("/compare/prepost", json=body).json()
     if as_json:
         typer.echo(json.dumps(r, indent=2, default=str))
     else:
         word, color = _SYM[r["result"]]
         typer.secho(f"Verification {word}: {r['pre']['id']} -> {r['post']['id']}", fg=color, bold=True)
+        if r.get("profile"):
+            pr = r["profile"]
+            typer.echo(f"profile {pr['name']}{' (strict)' if pr['strict'] else ''}, route drop threshold "
+                       f"{pr['route_drop_pct']}%")
         ds = r.get("diff_summary") or {}
         typer.echo(f"{ds.get('total', 0)} change(s) on {ds.get('devices_changed', 0)} device(s)")
         for name in r.get("devices_not_collected_in_post", []):

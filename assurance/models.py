@@ -14,6 +14,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -268,6 +269,26 @@ class Schedule(Base):
 
 
 # ------------------------------------------------------------------ checks
+
+
+class CheckProfile(Base):
+    """Which checks a type of change must pass, e.g. "routing change" or "firmware upgrade".
+
+    rules empty = every active rule. label_prefix picks the profile automatically for pre/post runs
+    by change label (longest prefix wins). strict = warnings fail the verification too.
+    """
+
+    __tablename__ = "check_profiles"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True)
+    description: Mapped[str | None] = mapped_column(String(512))
+    rules: Mapped[list] = mapped_column(JSONType, default=list)
+    label_prefix: Mapped[str | None] = mapped_column(String(128))
+    route_drop_pct: Mapped[float] = mapped_column(Float, default=2.0)
+    strict: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_by: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
 class CheckRule(Base):

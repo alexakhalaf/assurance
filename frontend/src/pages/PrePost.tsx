@@ -15,7 +15,9 @@ export default function PrePost() {
   const [label, setLabel] = useState("");
   const [pre, setPre] = useState("previous");
   const [post, setPost] = useState("latest");
-  const [pct, setPct] = useState(2);
+  const [pct, setPct] = useState<number | "">("");
+  const [profile, setProfile] = useState("");
+  const profiles = useApi<any[]>("/checks/profiles");
   const [res, setRes] = useState<any>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -23,7 +25,8 @@ export default function PrePost() {
   async function run() {
     setErr(null); setBusy(true);
     try {
-      const body = mode === "label" ? { label, route_drop_pct: pct } : { pre, post, route_drop_pct: pct };
+      const common = { profile: profile || null, route_drop_pct: pct === "" ? null : pct };
+      const body = mode === "label" ? { label, ...common } : { pre, post, ...common };
       setRes(await api("/compare/prepost", { method: "POST", body: JSON.stringify(body) }));
     } catch (e: any) { setErr(e.message); setRes(null); } finally { setBusy(false); }
   }
@@ -58,8 +61,13 @@ export default function PrePost() {
                 {labels.length === 0 && <span className="muted">Take snapshots with <code>--label change:CHG…</code> before and after.</span>}
               </label>
             )}
+            <label className="inline">Check profile
+              <select value={profile} onChange={(e) => setProfile(e.target.value)}>
+                <option value="">Auto (from change label), else all checks</option>
+                {(profiles.data || []).map((p) => <option key={p.name} value={p.name}>{p.name}{p.strict ? " (strict)" : ""}</option>)}
+              </select></label>
             <label className="inline">Route drop threshold
-              <input type="number" min={0} max={100} step={0.5} value={pct} onChange={(e) => setPct(+e.target.value)} style={{ width: 80 }} /> %</label>
+              <input type="number" min={0} max={100} step={0.5} value={pct} placeholder="profile" onChange={(e) => setPct(e.target.value === "" ? "" : +e.target.value)} style={{ width: 90 }} /> %</label>
             <button className="btn primary" disabled={busy || (mode === "label" && !label)} onClick={run}>{busy ? "Verifying…" : "Verify"}</button>
           </div>
         </div>
@@ -71,6 +79,7 @@ export default function PrePost() {
           <div className={`verdict ${res.result}`}>
             <Badge status={res.result} />
             <strong>{WORD[res.result]}</strong>
+            {res.profile && <span className="tag">profile {res.profile.name}{res.profile.strict ? " · strict" : ""}</span>}
             <span className="muted">
               <Link to={`/snapshots/${res.pre.id}`}>{fmtTime(res.pre.created_at)}</Link> → <Link to={`/snapshots/${res.post.id}`}>{fmtTime(res.post.created_at)}</Link>
             </span>
