@@ -1,20 +1,39 @@
 import { FormEvent, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth";
-import { Card, Empty, ErrorNote, PageHeader } from "../components/ui";
+import { Card, Empty, ErrorNote, PageHeader, UTabs } from "../components/ui";
+import { Col, DataGrid } from "../components/DataGrid";
 import { ago, fmtTime, useApi } from "../hooks";
+
+const TABS = [
+  { id: "credentials", label: "Device credentials", admin: true },
+  { id: "schedules", label: "Collection schedules", admin: false },
+  { id: "tokens", label: "API tokens", admin: false },
+  { id: "users", label: "Users", admin: true },
+  { id: "audit", label: "Audit log", admin: true },
+];
 
 export default function Settings() {
   const { can } = useAuth();
+  const { tab: t } = useParams();
+  const nav = useNavigate();
+  const tabs = TABS.filter((x) => !x.admin || can("admin"));
+  const tab = tabs.find((x) => x.id === t)?.id || tabs[0].id;
   return (
-    <>
-      <PageHeader title="Settings" />
-      {can("admin") && <Credentials />}
-      <Schedules />
-      <Tokens />
-      {can("admin") && <Users />}
-      {can("admin") && <Audit />}
-    </>
+    <div className="page">
+      <PageHeader title="Settings" crumbs={[["Administration"]]} sub="Credentials, schedules, access and the audit trail" />
+      <section className="card">
+        <UTabs value={tab} onChange={(v) => nav(`/settings/${v}`)} tabs={tabs.map((x) => ({ id: x.id, label: x.label }))} />
+        <div className="settings-body">
+          {tab === "credentials" && <Credentials />}
+          {tab === "schedules" && <Schedules />}
+          {tab === "tokens" && <Tokens />}
+          {tab === "users" && <Users />}
+          {tab === "audit" && <Audit />}
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -154,13 +173,18 @@ function Users() {
 }
 
 function Audit() {
-  const { data } = useApi<any>("/audit", { limit: 50 });
+  const { data, loading, error } = useApi<any>("/audit", { limit: 1000 });
+  const columns: Col[] = [
+    { key: "at", label: "When", render: (a) => fmtTime(a.at), text: (a) => fmtTime(a.at), sortValue: (a) => a.at },
+    { key: "actor", label: "Who" },
+    { key: "action", label: "Action", mono: true },
+    { key: "target", label: "Target" },
+    { key: "detail", label: "Detail", wrap: true, sortable: false, text: (a) => (a.detail ? JSON.stringify(a.detail) : ""), render: (a) => a.detail ? <span className="mono small">{JSON.stringify(a.detail)}</span> : <span className="faint">—</span> },
+    { key: "ip", label: "From", mono: true },
+  ];
   return (
-    <Card title="Audit log (latest 50)">
-      <div className="tbl-wrap">
-        <table className="tbl dense"><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Target</th><th>From</th></tr></thead>
-          <tbody>{data?.items.map((a: any) => <tr key={a.id}><td>{fmtTime(a.at)}</td><td>{a.actor}</td><td className="mono">{a.action}</td><td>{a.target || "—"}</td><td className="mono muted">{a.ip || ""}</td></tr>)}</tbody></table>
-      </div>
+    <Card title="Audit log" sub="latest 1,000 events">
+      <DataGrid storageKey="audit" columns={columns} rows={data?.items || []} loading={loading} error={error} rowKey={(a) => String(a.id)} autoHeight />
     </Card>
   );
 }

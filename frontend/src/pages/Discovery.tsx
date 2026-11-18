@@ -46,7 +46,7 @@ export default function Discovery() {
   const items: any[] = c.data?.items || [];
   const chosen = Object.keys(sel);
   return (
-    <>
+    <div className="page">
       <PageHeader title="Discovery" sub="CDP and LLDP neighbors that are not in inventory yet. Nothing is added without approval." />
       <ErrorNote error={c.error || err} />
       {msg && <div className="alert info">{msg}</div>}
@@ -95,6 +95,6 @@ export default function Discovery() {
           </div>
         )}
       </Card>
-    </>
+    </div>
   );
 }

@@ -1,61 +1,61 @@
 import { FormEvent, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { api, Device, download } from "../api";
 import { useAuth } from "../auth";
-import { Badge, Card, Empty, ErrorNote, Modal, PageHeader } from "../components/ui";
+import { Col, DataGrid } from "../components/DataGrid";
+import { Icon } from "../components/Icon";
+import { Badge, ErrorNote, Modal, PageHeader, Stat } from "../components/ui";
 import { ago, useApi } from "../hooks";
 
 export default function Devices() {
   const { can } = useAuth();
-  const [q, setQ] = useState("");
-  const [platform, setPlatform] = useState("");
-  const [status, setStatus] = useState("");
-  const { data, error, reload } = useApi<{ items: Device[]; total: number }>("/devices", { q, platform, status, limit: 1000 });
+  const nav = useNavigate();
+  const { data, error, loading, reload } = useApi<{ items: Device[]; total: number }>("/devices", { limit: 1000 });
   const [adding, setAdding] = useState(false);
   const [importing, setImporting] = useState(false);
-
+  const items = data?.items || [];
+  const opts = (f: (d: Device) => string | null) => [...new Set(items.map(f).filter(Boolean) as string[])].sort();
+  const failed = items.filter((d) => d.last_collection_status === "failed").length;
+  const columns: Col<Device>[] = [
+    { key: "name", label: "Device", render: (d) => <Link to={`/devices/${encodeURIComponent(d.name)}`} onClick={(e) => e.stopPropagation()}><strong>{d.name}</strong></Link>, text: (d) => d.name },
+    { key: "host", label: "Management IP", mono: true },
+    { key: "platform", label: "Platform", filter: "select", options: ["iosxe", "nxos"] },
+    { key: "site", label: "Site", filter: "select", options: opts((d) => d.site) },
+    { key: "role", label: "Role", filter: "select", options: opts((d) => d.role) },
+    { key: "model", label: "Model" },
+    { key: "os_version", label: "Version", mono: true },
+    { key: "serial", label: "Serial", mono: true, hidden: true },
+    { key: "hostname", label: "Hostname", hidden: true },
+    { key: "tags", label: "Tags", sortable: false, render: (d) => d.tags.map((t) => <span key={t} className="tag">{t}</span>), text: (d) => d.tags.join(" ") },
+    { key: "status", label: "Status", filter: "select", options: ["active", "maintenance", "retired"], render: (d) => <Badge status={d.status} /> },
+    { key: "last_collection_status", label: "Last collection", filter: "select", options: ["ok", "partial", "failed"],
+      render: (d) => d.last_collection_status ? <span className="row gap"><Badge status={d.last_collection_status} /><span className="muted small">{ago(d.last_collected_at)}</span></span> : <span className="faint">never</span>,
+      text: (d) => d.last_collection_status || "" },
+    { key: "credential", label: "Credential", hidden: true, text: (d) => d.credential || "inherited" },
+    { key: "ssh_host_key_fingerprint", label: "SSH host key", mono: true, hidden: true },
+  ];
   return (
-    <>
-      <PageHeader title="Devices" sub={data ? `${data.total} device(s) in inventory` : undefined}
+    <div className="page">
+      <PageHeader title="Devices" crumbs={[["Inventory"]]} sub="Every device Assurance collects. Inventory is owned here; no external source of truth."
         actions={<>
-          <button className="btn" onClick={() => download("/devices/export.csv")}>Export CSV</button>
-          {can("admin") && <button className="btn" onClick={() => setImporting(true)}>Import CSV</button>}
-          {can("admin") && <button className="btn primary" onClick={() => setAdding(true)}>Add device</button>}
+          <button className="btn" onClick={() => download("/devices/export.csv")}><Icon name="download" size={14} /> Export</button>
+          {can("admin") && <button className="btn" onClick={() => setImporting(true)}><Icon name="upload" size={14} /> Import CSV</button>}
+          {can("admin") && <button className="btn primary" onClick={() => setAdding(true)}><Icon name="plus" size={14} /> Add device</button>}
         </>} />
-      <ErrorNote error={error} />
-      <Card>
-        <div className="filters">
-          <input placeholder="Search name, IP, model, serial" value={q} onChange={(e) => setQ(e.target.value)} />
-          <select value={platform} onChange={(e) => setPlatform(e.target.value)}>
-            <option value="">All platforms</option><option value="iosxe">IOS-XE</option><option value="nxos">NX-OS</option>
-          </select>
-          <select value={status} onChange={(e) => setStatus(e.target.value)}>
-            <option value="">Any status</option><option>active</option><option>maintenance</option><option>retired</option>
-          </select>
-        </div>
-        {data && data.items.length === 0 ? <Empty>No devices match.</Empty> : (
-          <div className="tbl-wrap">
-            <table className="tbl">
-              <thead><tr><th>Name</th><th>Host</th><th>Platform</th><th>Site</th><th>Role</th><th>Model</th><th>Version</th><th>Status</th><th>Last collection</th></tr></thead>
-              <tbody>
-                {data?.items.map((d) => (
-                  <tr key={d.id}>
-                    <td><Link to={`/devices/${d.name}`}><strong>{d.name}</strong></Link>
-                      {d.tags.length > 0 && <div className="tags">{d.tags.map((t) => <span key={t} className="tag">{t}</span>)}</div>}</td>
-                    <td className="mono">{d.host}</td><td>{d.platform}</td><td>{d.site || "—"}</td><td>{d.role || "—"}</td>
-                    <td>{d.model || "—"}</td><td className="mono">{d.os_version || "—"}</td>
-                    <td><Badge status={d.status} /></td>
-                    <td>{d.last_collection_status ? <><Badge status={d.last_collection_status} /> <span className="muted">{ago(d.last_collected_at)}</span></> : <span className="muted">never</span>}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Card>
+      <div className="stats">
+        <Stat label="Devices" value={items.length} hint={`${items.filter((d) => d.status === "active").length} active`} />
+        <Stat label="IOS-XE / NX-OS" value={`${items.filter((d) => d.platform === "iosxe").length} / ${items.filter((d) => d.platform === "nxos").length}`} hint="platforms" />
+        <Stat label="Sites" value={opts((d) => d.site).length} hint={`${items.filter((d) => !d.site).length} unassigned`} />
+        <Stat label="Last collection failed" value={failed} tone={failed ? "bad" : "good"} hint={failed ? "check credentials and reachability" : "all collected"} />
+      </div>
+      <section className="card">
+        <DataGrid storageKey="devices" columns={columns} rows={items} loading={loading} error={error} rowKey={(d) => String(d.id)}
+          onRowClick={(d) => nav(`/devices/${encodeURIComponent(d.name)}`)} searchPlaceholder="Search name, IP, model, serial"
+          emptyText={items.length ? "No devices match." : "No devices yet. Add one or import a CSV."} />
+      </section>
       {adding && <DeviceForm onClose={() => setAdding(false)} onSaved={() => { setAdding(false); reload(); }} />}
       {importing && <ImportCsv onClose={() => setImporting(false)} onDone={() => { setImporting(false); reload(); }} />}
-    </>
+    </div>
   );
 }
 

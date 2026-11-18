@@ -1,122 +1,89 @@
 import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { Collection, download, Snapshot, TABLES } from "../api";
-import { Badge, Card, Empty, ErrorNote, Modal, PageHeader, Stat } from "../components/ui";
-import { fmtTime, short, useApi } from "../hooks";
+import { Collection, download, Snapshot, toast } from "../api";
+import { Col, DataGrid, tableQuery } from "../components/DataGrid";
+import { Icon } from "../components/Icon";
+import { Badge, Empty, ErrorNote, Loading, Modal, PageHeader, Stat, UTabs } from "../components/ui";
+import { duration, fmtTime, useApi } from "../hooks";
+import { useSnapshot } from "../snapshot";
+import { TABLE_BY_ID, TABLE_DEFS } from "../tables";
 
 export default function SnapshotDetail() {
   const { id = "" } = useParams();
   const { data: s, error } = useApi<Snapshot & { collections: Collection[] }>(`/snapshots/${id}`, undefined,
     (d) => ["queued", "running", "finalizing"].includes(d.status));
-  const [tab, setTab] = useState("interfaces");
+  const [tab, setTab] = useState("devices");
   const [raw, setRaw] = useState<string | null>(null);
+  const snapCtx = useSnapshot();
 
-  if (error) return <ErrorNote error={error} />;
-  if (!s) return <div className="muted">Loading…</div>;
+  if (error) return <div className="page"><ErrorNote error={error} /></div>;
+  if (!s) return <Loading />;
   const done = s.collections.filter((c) => !["pending", "running"].includes(c.status)).length;
+  const failed = s.collections.filter((c) => c.status === "failed").length;
   const ch = s.summary?.changes;
+  const cs = s.summary?.checks;
   const diffable = ["complete", "partial"].includes(s.status);
+  const rows = Object.values(s.summary?.rows || {}).reduce((a: number, b: any) => a + b, 0) as number;
+  const running = ["queued", "running", "finalizing"].includes(s.status);
+  const columns: Col<Collection>[] = [
+    { key: "device_name", label: "Device", render: (c) => <Link to={`/devices/${encodeURIComponent(c.device_name)}`}>{c.device_name}</Link> },
+    { key: "platform", label: "Platform", filter: "select", options: ["iosxe", "nxos"], text: (c) => c.device_meta.platform || "" },
+    { key: "site", label: "Site", text: (c) => c.device_meta.site || "" },
+    { key: "status", label: "Status", filter: "select", options: ["ok", "partial", "failed", "running", "pending"], render: (c) => <Badge status={c.status} /> },
+    { key: "duration_ms", label: "Time", num: true, filter: false, render: (c) => duration(c.duration_ms) },
+    { key: "rows", label: "Rows", num: true, filter: false, sortValue: (c) => Object.values(c.row_counts).reduce((a, b) => a + b, 0),
+      render: (c) => (Object.values(c.row_counts).reduce((a, b) => a + b, 0) || "—").toLocaleString() },
+    { key: "notes", label: "Notes", wrap: true, text: (c) => c.error || c.warnings.join(" "),
+      render: (c) => c.error ? <span className="bad">{c.error}</span> : c.warnings.length ? <span className="warn">{c.warnings.length} parser warning(s): {c.warnings[0]}</span> : <span className="faint">—</span> },
+    { key: "raw", label: "", filter: false, sortable: false, render: (c) => diffable && c.status !== "failed" &&
+      <button className="btn sm" onClick={(e) => { e.stopPropagation(); setRaw(c.device_name); }}>Raw output</button> },
+  ];
 
   return (
-    <>
-      <PageHeader title={`Snapshot ${fmtTime(s.created_at)}`}
-        sub={<><Link to="/snapshots">Snapshots</Link> · <span className="mono">{s.id}</span> · {s.trigger}{s.requested_by ? ` by ${s.requested_by}` : ""}</>}
-        actions={ch && <Link className="btn" to={`/compare?from=${ch.previous}&to=${s.id}`}>Diff vs previous</Link>} />
+    <div className="page">
+      <PageHeader crumbs={[["Snapshots", "/snapshots"], [fmtTime(s.created_at)]]}
+        title={<span className="row gap">Snapshot {fmtTime(s.created_at)} <Badge status={s.status} /></span>}
+        sub={<><span className="mono">{s.id}</span> · {s.trigger}{s.requested_by ? ` by ${s.requested_by}` : ""}{s.labels.length ? <> · {s.labels.map((l) => <span className="tag" key={l}>{l}</span>)}</> : null}</>}
+        actions={<>
+          {diffable && <button className="btn" onClick={() => { snapCtx.setRef(s.id); toast(`Showing data from ${fmtTime(s.created_at)} everywhere`); }}><Icon name="snapshots" size={14} /> Use as current</button>}
+          {ch && <Link className="btn primary" to={`/compare?from=${ch.previous}&to=${s.id}`}><Icon name="compare" size={14} /> Diff vs previous</Link>}
+        </>} />
       <div className="stats">
-        <Stat label="Status" value={<Badge status={s.status} />} hint={`${done} / ${s.device_count} devices finished`} />
-        <Stat label="Duration" value={s.finished_at && s.started_at ? `${((+new Date(s.finished_at) - +new Date(s.started_at)) / 1000).toFixed(1)} s` : "…"} />
-        <Stat label="Rows collected" value={Object.values(s.summary?.rows || {}).reduce((a: number, b: any) => a + b, 0)} />
-        <Stat label="Changes vs previous" value={ch?.total ?? "—"} tone={ch?.total ? "warn" : undefined} />
+        <Stat label="Devices" value={`${done} / ${s.device_count}`} hint={running ? "collecting…" : failed ? `${failed} failed` : "all collected"} tone={running ? "warn" : failed ? "bad" : "good"} />
+        <Stat label="Duration" value={s.finished_at && s.started_at ? duration(+new Date(s.finished_at) - +new Date(s.started_at)) : "…"} hint={`started ${fmtTime(s.started_at)}`} />
+        <Stat label="State rows" value={rows.toLocaleString()} hint={`${Object.keys(s.summary?.rows || {}).length} tables`} />
+        <Stat label="Changes vs previous" value={ch?.total?.toLocaleString() ?? "—"} tone={ch ? (ch.total ? "warn" : "good") : undefined} hint={ch ? `${ch.devices_changed} device(s)` : "first snapshot"} />
+        <Stat label="Check violations" value={cs ? cs.fail + cs.warning : "—"} tone={cs ? (cs.fail ? "bad" : cs.warning ? "warn" : "good") : undefined} hint={cs ? `${cs.fail} fail · ${cs.warning} warn` : "—"} />
       </div>
-      {s.labels.length > 0 && <div className="row gap">{s.labels.map((l) => <span className="tag" key={l}>{l}</span>)}</div>}
-
-      <Card title="Devices">
-        <div className="tbl-wrap">
-          <table className="tbl">
-            <thead><tr><th>Device</th><th>Platform</th><th>Status</th><th>Time</th><th>Rows</th><th>Notes</th><th></th></tr></thead>
-            <tbody>
-              {s.collections.map((c) => (
-                <tr key={c.device_name}>
-                  <td><Link to={`/devices/${c.device_name}`}>{c.device_name}</Link></td>
-                  <td>{c.device_meta.platform}</td>
-                  <td><Badge status={c.status} /></td>
-                  <td>{c.duration_ms != null ? `${(c.duration_ms / 1000).toFixed(1)} s` : "…"}</td>
-                  <td>{Object.values(c.row_counts).reduce((a, b) => a + b, 0) || "—"}</td>
-                  <td className={c.error ? "bad" : "muted"}>{c.error || (c.warnings.length ? `${c.warnings.length} parser warning(s): ${c.warnings[0]}` : "")}</td>
-                  <td>{diffable && c.status !== "failed" && <button className="btn sm ghost" onClick={() => setRaw(c.device_name)}>Raw output</button>}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </Card>
-
-      {diffable && (
-        <Card title="State tables" actions={<div className="tabs">{TABLES.map((t) => <button key={t} className={t === tab ? "tab active" : "tab"} onClick={() => setTab(t)}>{t} <span className="muted">{s.summary?.rows?.[t] ?? 0}</span></button>)}</div>}>
-          <StateTable snapshot={s.id} table={tab} />
-        </Card>
-      )}
+      {running && <div className="loading-bar" />}
+      <section className="card">
+        <UTabs value={tab} onChange={setTab} tabs={[
+          { id: "devices", label: "Devices", n: s.device_count },
+          ...(diffable ? TABLE_DEFS.map((t) => ({ id: t.id, label: t.title.replace(" (CDP / LLDP)", "").replace("Routing table", "Routes"), n: s.summary?.rows?.[t.id] ?? 0 })) : []),
+        ]} />
+        {tab === "devices" ? (
+          <DataGrid storageKey="snapshot.devices" columns={columns} rows={s.collections} rowKey={(c) => c.device_name} autoHeight pageSize={100} />
+        ) : <SnapTable snapshot={s.id} table={tab} />}
+      </section>
       {raw && <RawViewer snapshot={s.id} device={raw} onClose={() => setRaw(null)} />}
-    </>
+    </div>
   );
 }
 
-const COLS: Record<string, string[]> = {
-  facts: ["hostname", "model", "serial", "os_version", "image"],
-  interfaces: ["admin_status", "oper_status", "description", "ipv4", "speed", "duplex", "mtu"],
-  routes: ["vrf", "prefix", "protocol", "distance", "metric", "next_hops"],
-  arp: ["vrf", "ip", "mac", "interface"],
-  neighbors: ["protocol", "local_interface", "remote_device", "remote_interface", "remote_platform", "mgmt_ip"],
-  bgp: ["vrf", "neighbor", "address_family", "remote_as", "state", "prefixes_received"],
-  ospf: ["vrf", "interface", "neighbor_id", "address", "state"],
-  mac: ["vlan", "mac", "type", "interfaces"],
-  vlans: ["vlan_id", "name", "state", "interfaces"],
-  vrfs: ["name", "rd", "state", "interfaces"],
-  hardware: ["name", "description", "pid", "serial"],
-  portchannels: ["protocol", "oper_status", "layer", "members_bundled", "members_down"],
-  stp: ["mode", "is_root", "root_address", "root_priority", "root_port", "bridge_priority", "ports"],
-  fhrp: ["interface", "protocol", "group", "state", "priority", "virtual_ip", "active_router", "standby_router"],
-  ntp: ["vrf", "stratum", "mode", "synchronized"],
-  snmp: ["kind", "name", "access", "acl", "version", "vrf", "group"],
-  aaa: ["kind", "name", "protocol", "address", "methods", "members"],
-  config: ["lines"],
-};
+function SnapTable({ snapshot, table }: { snapshot: string; table: string }) {
+  const def = TABLE_BY_ID[table];
+  const source = useMemo(() => ({ path: `/snapshots/${snapshot}/tables/${table}`, map: (q: any) => tableQuery(def.columns, q) }), [snapshot, table, def]);
+  return <DataGrid key={table} storageKey={`tech.${table}`} columns={def.columns} source={source} rowKey={(r) => r.device + "\u0000" + r.key} autoHeight
+    onExport={(q) => download(`/snapshots/${snapshot}/tables/${table}`, { ...tableQuery(def.columns, q), format: "csv" })} />;
+}
 
+/** Kept for other pages that embed a state table for one device. */
 export function StateTable({ snapshot, table, device }: { snapshot: string; table: string; device?: string }) {
-  const [q, setQ] = useState("");
-  const params = useMemo(() => ({ q, device: device ? [device] : undefined, limit: 2000 }), [q, device]);
-  const { data, error } = useApi<any>(`/snapshots/${snapshot}/tables/${table}`, params);
-  const cols = COLS[table] || [];
-  return (
-    <>
-      <div className="filters">
-        <input placeholder={`Search ${table}`} value={q} onChange={(e) => setQ(e.target.value)} />
-        <span className="muted">{data ? `${data.total} row(s)` : ""}</span>
-        <button className="btn sm" onClick={() => download(`/snapshots/${snapshot}/tables/${table}`, { format: "csv", q, device: device ? [device] : undefined })}>CSV</button>
-      </div>
-      <ErrorNote error={error} />
-      {data && data.items.length === 0 ? <Empty>No rows.</Empty> : (
-        <div className="tbl-wrap">
-          <table className="tbl dense">
-            <thead><tr>{!device && <th>Device</th>}<th>Key</th>{cols.map((c) => <th key={c}>{c.replace(/_/g, " ")}</th>)}</tr></thead>
-            <tbody>
-              {data?.items.map((r: any) => (
-                <tr key={r.device + r.key}>
-                  {!device && <td>{r.device}</td>}
-                  <td className="mono">{r.key}</td>
-                  {cols.map((c) => c === "lines"
-                    ? <td key={c}><pre className="cfg">{(r[c] || []).join("\n") || "—"}</pre></td>
-                    : c === "ports" ? <td key={c} className="mono">{Object.entries(r[c] || {}).map(([i, role]) => `${i} ${role}`).join(", ") || "—"}</td>
-                    : <td key={c} className={c.includes("status") || c === "state" ? `st-${r[c]}` : ""}>{short(r[c])}</td>)}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {data && data.total > data.items.length && <p className="muted">Showing the first {data.items.length} rows. Refine the search or export CSV.</p>}
-        </div>
-      )}
-    </>
-  );
+  const def = TABLE_BY_ID[table];
+  const columns = useMemo(() => def.columns.filter((c) => !device || c.key !== "device"), [def, device]);
+  const source = useMemo(() => ({ path: `/snapshots/${snapshot}/tables/${table}`, params: device ? { device: [device] } : {}, map: (q: any) => tableQuery(columns, q) }),
+    [snapshot, table, device, columns]);
+  return <DataGrid key={table} storageKey={`tech.${table}${device ? ".dev" : ""}`} columns={columns} source={source} rowKey={(r) => r.device + "\u0000" + r.key} autoHeight />;
 }
 
 function RawViewer({ snapshot, device, onClose }: { snapshot: string; device: string; onClose: () => void }) {

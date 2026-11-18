@@ -17,7 +17,7 @@ export default function Search() {
   const cfg = useApi<any>(valid && mode === "config" ? "/search/config" : null, { pattern: q, regex: sp.get("regex") === "1" });
 
   return (
-    <>
+    <div className="page">
       <PageHeader title="Search" sub="Find an IP, MAC, hostname, prefix, serial or any text, now or in past snapshots" />
       <Card>
         <form className="filters wrap" style={{ marginBottom: 0 }} onSubmit={(e) => { e.preventDefault(); set("q", input.trim()); }}>
@@ -37,7 +37,7 @@ export default function Search() {
       {mode === "now" && <NowResults r={now.data} error={now.error} />}
       {mode === "history" && <HistoryResults r={hist.data} error={hist.error} />}
       {mode === "config" && <ConfigResults r={cfg.data} error={cfg.error} />}
-    </>
+    </div>
   );
 }
 

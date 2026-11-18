@@ -221,6 +221,11 @@ def _run_device_collection(collection_id: int) -> None:
     maybe_finalize(snapshot_id)
 
 
+def _top_devices(by_device: dict, n: int = 50) -> dict[str, int]:
+    counts = ((d, sum(v.values())) for d, v in by_device.items())
+    return dict(sorted(counts, key=lambda kv: -kv[1])[:n])
+
+
 def reap_stale(now: datetime | None = None) -> dict:
     """Recover from lost work so snapshots always finish.
 
@@ -326,7 +331,9 @@ def _finalize(snapshot_id: str) -> None:
                 summary["changes"] = {"previous": prev.id, "total": s["total"], "added": s["added"],
                                       "removed": s["removed"], "changed": s["changed"],
                                       "devices_changed": s["devices_changed"],
-                                      "by_table": {t: sum(v.values()) for t, v in s["by_table"].items()}}
+                                      "by_table": {t: sum(v.values()) for t, v in s["by_table"].items()},
+                                      # kept so the dashboard never has to diff whole snapshots on page load
+                                      "top_devices": _top_devices(s["by_device"])}
         if snap.status in DIFFABLE:
             from .checks import run_snapshot_checks
 

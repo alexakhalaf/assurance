@@ -40,7 +40,7 @@ export default function Reports() {
   );
 
   return (
-    <>
+    <div className="page">
       <PageHeader title="Reports" sub="Shareable reports in HTML (print to PDF), Excel or CSV" />
       <Card>
         <div className="filters wrap" style={{ marginBottom: 0 }}>
@@ -70,7 +70,7 @@ export default function Reports() {
       </div>
       <ScheduledReports />
       <p className="muted">The same reports are available from the API (<code>/api/v1/reports/…</code>) and the CLI (<code>assurance report changes -o changes.xlsx</code>).</p>
-    </>
+    </div>
   );
 }
 

@@ -210,3 +210,17 @@ def test_password_change_and_reset_end_sessions(client, admin_h):
         assert all(t.revoked for t in db.scalars(select(ApiToken).where(ApiToken.kind == "session",
                                                                          ApiToken.name == "web session"))
                    if t.user.username == "oper")
+
+
+def test_filesystem_store_concurrent_writes_of_one_object(tmp_path):
+    """Found by the 1,000-device load test: workers writing the same content-addressed object at once
+    (an empty command output) shared one temp file, and one of them failed its collection."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from assurance.storage import FilesystemStore
+
+    store = FilesystemStore(tmp_path)
+    with ThreadPoolExecutor(16) as pool:
+        list(pool.map(lambda _: store.put("raw/e3/same.gz", b"x" * 1000), range(200)))
+    assert store.get("raw/e3/same.gz") == b"x" * 1000
+    assert not list(tmp_path.rglob("*.tmp"))

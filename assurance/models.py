@@ -246,6 +246,10 @@ class StateRow(Base):
     __table_args__ = (
         Index("ix_state_snap_table_dev", "snapshot_id", "table_name", "device_name"),
         Index("ix_state_dev_table", "device_name", "table_name"),
+        # Row identity in snapshot order, covering row_hash and id: lets a diff merge-join two snapshots
+        # with index-only scans instead of sorting ~1M rows per side on disk (4 s -> 0.7 s at 1,000 devices).
+        Index("ix_state_snap_identity", "snapshot_id", "device_name", "table_name", "key",
+              postgresql_include=["row_hash", "id"]),
         # Text search (ILIKE over the row JSON); needs the pg_trgm extension, created by migration 0008.
         Index("ix_state_data_trgm", text("(data::text) gin_trgm_ops"), postgresql_using="gin"),
     )

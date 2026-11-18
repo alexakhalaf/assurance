@@ -78,7 +78,7 @@ export default function Checks() {
   const graded = list.filter((r) => r.enabled && r.latest).length;
 
   return (
-    <>
+    <div className="page">
       <PageHeader title="Intent checks" sub="Rules every snapshot is graded against"
         actions={can("operator") && <>
           <button className="btn" disabled={busy} onClick={regrade}>{busy ? "Grading…" : "Re-grade latest"}</button>
@@ -148,7 +148,7 @@ export default function Checks() {
         onClose={() => setEditProfile(null)} onSaved={() => { setEditProfile(null); profiles.reload(); }} />}
       {editing && <RuleEditor rule={editing === "new" ? null : editing} onClose={() => setEditing(null)}
         onSaved={() => { setEditing(null); regrade(); }} />}
-    </>
+    </div>
   );
 }
 

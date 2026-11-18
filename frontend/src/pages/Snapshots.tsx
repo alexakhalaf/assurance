@@ -1,64 +1,79 @@
 import { FormEvent, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { api, Snapshot } from "../api";
+import { api, Snapshot, toast } from "../api";
 import { useAuth } from "../auth";
-import { Badge, Card, Empty, ErrorNote, Modal, PageHeader } from "../components/ui";
-import { fmtTime, useApi } from "../hooks";
+import { Col, DataGrid } from "../components/DataGrid";
+import { Icon } from "../components/Icon";
+import { Badge, ErrorNote, Modal, PageHeader } from "../components/ui";
+import { duration, fmtTime, useApi } from "../hooks";
+import { DIFFABLE, useSnapshot } from "../snapshot";
 
 const RUNNING = ["queued", "running", "finalizing"];
 
 export default function Snapshots() {
   const { can } = useAuth();
-  const [label, setLabel] = useState("");
-  const { data, error } = useApi<{ items: Snapshot[]; total: number }>("/snapshots", { label, limit: 200 },
+  const { data, error, loading, reload } = useApi<{ items: Snapshot[]; total: number }>("/snapshots", { limit: 500 },
     (d) => d.items.some((s) => RUNNING.includes(s.status)));
   const [starting, setStarting] = useState(false);
   const [sel, setSel] = useState<string[]>([]);
   const nav = useNavigate();
+  const snapCtx = useSnapshot();
+  const items = data?.items || [];
 
   const toggle = (id: string) => setSel((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s.slice(-1), id]));
   const compare = () => {
-    const items = data!.items.filter((s) => sel.includes(s.id)).sort((a, b) => a.created_at.localeCompare(b.created_at));
-    nav(`/compare?from=${items[0].id}&to=${items[1].id}`);
+    const chosen = items.filter((s) => sel.includes(s.id)).sort((a, b) => a.created_at.localeCompare(b.created_at));
+    nav(`/compare?from=${chosen[0].id}&to=${chosen[1].id}`);
   };
-
+  async function remove(s: Snapshot) {
+    if (!confirm(`Delete the snapshot from ${fmtTime(s.created_at)}? Its state tables and check results are removed for good.`)) return;
+    try {
+      await api(`/snapshots/${s.id}`, { method: "DELETE" });
+      toast("Snapshot deleted");
+      setSel((x) => x.filter((i) => i !== s.id));
+      reload();
+      snapCtx.reload();
+    } catch (e: any) { toast(e.message, "bad"); }
+  }
+  const columns: Col<Snapshot>[] = [
+    { key: "sel", label: "", filter: false, sortable: false, width: 34, render: (s) => (
+      <input type="checkbox" aria-label="select for compare" checked={sel.includes(s.id)} onClick={(e) => e.stopPropagation()} onChange={() => toggle(s.id)}
+        disabled={RUNNING.includes(s.status) || s.status === "failed"} />) },
+    { key: "created_at", label: "Taken", render: (s) => <Link to={`/snapshots/${s.id}`} onClick={(e) => e.stopPropagation()}>{fmtTime(s.created_at)}</Link>, text: (s) => fmtTime(s.created_at), sortValue: (s) => s.created_at },
+    { key: "status", label: "Status", filter: "select", options: ["complete", "partial", "failed", "running", "queued", "finalizing"], render: (s) => <Badge status={s.status} /> },
+    { key: "devices", label: "Devices", num: true, filter: false, text: (s) => String(s.device_count), sortValue: (s) => s.device_count,
+      render: (s) => <>{s.summary?.devices_ok ?? "…"} / {s.device_count}{s.summary?.devices_failed ? <span className="bad"> · {s.summary.devices_failed} failed</span> : null}</> },
+    { key: "changes", label: "Changes", num: true, filter: false, text: (s) => String(s.summary?.changes?.total ?? ""), sortValue: (s) => s.summary?.changes?.total ?? -1,
+      render: (s) => s.summary?.changes ? <Link to={`/compare?from=${s.summary.changes.previous}&to=${s.id}`} onClick={(e) => e.stopPropagation()}>{s.summary.changes.total}</Link> : <span className="faint">—</span> },
+    { key: "checks", label: "Checks", filter: false, sortable: false, text: () => "",
+      render: (s) => s.summary?.checks ? <span className="row gap">{s.summary.checks.fail > 0 && <span className="badge badge-fail">{s.summary.checks.fail}</span>}
+        {s.summary.checks.warning > 0 && <span className="badge badge-warning">{s.summary.checks.warning}</span>}
+        {!s.summary.checks.fail && !s.summary.checks.warning && <span className="badge badge-pass">pass</span>}</span> : <span className="faint">—</span> },
+    { key: "duration", label: "Duration", num: true, filter: false, text: () => "",
+      render: (s) => s.finished_at && s.started_at ? duration(+new Date(s.finished_at) - +new Date(s.started_at)) : <span className="faint">…</span> },
+    { key: "trigger", label: "Trigger", filter: "select", options: ["api", "cli", "schedule", "ui", "discovery"], render: (s) => <>{s.trigger}{s.requested_by ? <span className="muted"> · {s.requested_by}</span> : null}</> },
+    { key: "labels", label: "Labels", text: (s) => s.labels.join(" "), sortable: false, render: (s) => s.labels.map((l) => <span className="tag" key={l}>{l}</span>) },
+    { key: "id", label: "Id", mono: true, hidden: true },
+    { key: "actions", label: "", filter: false, sortable: false, render: (s) => (
+      <div className="row gap end" onClick={(e) => e.stopPropagation()}>
+        {DIFFABLE.includes(s.status) && <button className="btn sm ghost" onClick={() => { snapCtx.setRef(s.id); toast(`Showing data from ${fmtTime(s.created_at)}`); }}>View</button>}
+        {can("admin") && !RUNNING.includes(s.status) && <button className="btn sm ghost danger" onClick={() => remove(s)} aria-label="Delete snapshot"><Icon name="trash" size={13} /></button>}
+      </div>) },
+  ];
   return (
-    <>
-      <PageHeader title="Snapshots" sub="Every snapshot is immutable and can be compared with any other"
+    <div className="page">
+      <PageHeader title="Snapshots" sub="Every snapshot is immutable and can be compared with any other. Labelled snapshots are kept by retention."
         actions={<>
-          <button className="btn" disabled={sel.length !== 2} onClick={compare}>Compare selected</button>
-          {can("operator") && <button className="btn primary" onClick={() => setStarting(true)}>New snapshot</button>}
+          <button className="btn" disabled={sel.length !== 2} onClick={compare}><Icon name="compare" size={14} /> Compare selected{sel.length ? ` (${sel.length}/2)` : ""}</button>
+          {can("operator") && <button className="btn primary" onClick={() => setStarting(true)}><Icon name="play" size={14} /> New snapshot</button>}
         </>} />
       <ErrorNote error={error} />
-      <Card>
-        <div className="filters"><input placeholder="Filter by label, e.g. change:CHG0012345" value={label} onChange={(e) => setLabel(e.target.value)} /></div>
-        {data && data.items.length === 0 ? <Empty>No snapshots yet.</Empty> : (
-          <div className="tbl-wrap">
-            <table className="tbl">
-              <thead><tr><th></th><th>Taken</th><th>Status</th><th>Devices</th><th>Changes</th><th>Trigger</th><th>Labels</th><th>Id</th></tr></thead>
-              <tbody>
-                {data?.items.map((s) => {
-                  const ch = s.summary?.changes;
-                  return (
-                    <tr key={s.id} className={sel.includes(s.id) ? "sel" : ""}>
-                      <td><input type="checkbox" aria-label="select" checked={sel.includes(s.id)} onChange={() => toggle(s.id)} disabled={RUNNING.includes(s.status) || s.status === "failed"} /></td>
-                      <td><Link to={`/snapshots/${s.id}`}>{fmtTime(s.created_at)}</Link></td>
-                      <td><Badge status={s.status} /></td>
-                      <td>{s.summary?.devices_ok ?? "…"} / {s.device_count}{s.summary?.devices_failed ? <span className="bad"> · {s.summary.devices_failed} failed</span> : null}</td>
-                      <td>{ch ? <Link to={`/compare?from=${ch.previous}&to=${s.id}`}>{ch.total}</Link> : <span className="muted">—</span>}</td>
-                      <td>{s.trigger}{s.requested_by ? <span className="muted"> · {s.requested_by}</span> : null}</td>
-                      <td>{s.labels.map((l) => <span className="tag" key={l}>{l}</span>)}</td>
-                      <td className="mono muted">{s.id.slice(0, 8)}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Card>
-      {starting && <NewSnapshot onClose={() => setStarting(false)} onStarted={(id) => nav(`/snapshots/${id}`)} />}
-    </>
+      <section className="card">
+        <DataGrid storageKey="snapshots" columns={columns} rows={items} loading={loading} rowKey={(s) => s.id}
+          onRowClick={(s) => nav(`/snapshots/${s.id}`)} emptyText="No snapshots yet." />
+      </section>
+      {starting && <NewSnapshot onClose={() => setStarting(false)} onStarted={(id) => { snapCtx.reload(); nav(`/snapshots/${id}`); }} />}
+    </div>
   );
 }
 

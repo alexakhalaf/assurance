@@ -41,7 +41,7 @@ export default function PrePost() {
   const failing = checks.filter(([, c]) => c.status !== "pass");
 
   return (
-    <>
+    <div className="page">
       <PageHeader title="Change verification" sub="Compare snapshots taken before and after a change window" />
       <Card>
         <div className="form">
@@ -108,6 +108,6 @@ export default function PrePost() {
           ))}
         </>
       )}
-    </>
+    </div>
   );
 }

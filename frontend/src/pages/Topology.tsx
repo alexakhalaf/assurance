@@ -3,10 +3,12 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { Snapshot } from "../api";
 import { Chart } from "../components/Chart";
 import { Card, Empty, ErrorNote, PageHeader, Stat } from "../components/ui";
+import { DataGrid } from "../components/DataGrid";
 import { fmtTime, useApi } from "../hooks";
+import { useSnapId, useSnapshot } from "../snapshot";
 
-const LINK = { unchanged: "#8d96a8", added: "#14a38b", removed: "#d9534f" } as Record<string, string>;
-const NODE = { ok: "#2f5bea", warning: "#e8a33d", fail: "#d9534f", external: "#94a3b8" } as Record<string, string>;
+const LINK = { unchanged: "#8d96a8", added: "#17a589", removed: "#d6524c" } as Record<string, string>;
+const NODE = { ok: "#3b7ddd", warning: "#e39a2d", fail: "#d6524c", external: "#9aa3af" } as Record<string, string>;
 
 export default function Topology() {
   const [sp, setSp] = useSearchParams();
@@ -15,7 +17,9 @@ export default function Topology() {
   const nav = useNavigate();
   const [showExternal, setShowExternal] = useState(true);
   const snaps = useApi<{ items: Snapshot[] }>("/snapshots", { limit: 100 });
-  const { data, error } = useApi<any>("/topology", { compare: compare || undefined, site: site || undefined });
+  const snap = useSnapId();
+  const { current } = useSnapshot();
+  const { data, error } = useApi<any>("/topology", { snapshot: snap, compare: compare || undefined, site: site || undefined });
   const set = (k: string, v: string) => { const n = new URLSearchParams(sp); if (v) n.set(k, v); else n.delete(k); setSp(n, { replace: true }); };
   const usable = (snaps.data?.items || []).filter((s) => ["complete", "partial"].includes(s.status)).slice(1);
   const sites = [...new Set((data?.nodes || []).map((n: any) => n.site).filter(Boolean))] as string[];
@@ -40,7 +44,8 @@ export default function Topology() {
       series: [{
         type: "graph", layout: "force", roam: true, draggable: true,
         force: { repulsion: 420, edgeLength: [90, 160], gravity: 0.08 },
-        label: { show: true, position: "bottom", fontSize: 11 },
+        label: { show: true, position: "bottom", fontSize: 11, color: getComputedStyle(document.documentElement).getPropertyValue("--text-2").trim() },
+        emphasis: { focus: "adjacency", lineStyle: { width: 3 } },
         edgeLabel: { show: false },
         data: nodes.map((n) => {
           const tone = !n.managed ? "external" : n.checks.fail ? "fail" : n.checks.warning ? "warning" : "ok";
@@ -61,8 +66,8 @@ export default function Topology() {
 
   const changed = (data?.links || []).filter((l: any) => l.change !== "unchanged");
   return (
-    <>
-      <PageHeader title="Topology" sub="Built from CDP and LLDP neighbors in the latest snapshot" />
+    <div className="page">
+      <PageHeader title="Topology" crumbs={[["Analysis"]]} sub={<>Built from CDP and LLDP neighbors{current ? ` in the snapshot of ${fmtTime(current.created_at)}` : ""}. Click a device to open it; scroll to zoom.</>} />
       <Card>
         <div className="filters wrap" style={{ marginBottom: 0 }}>
           <label className="inline">Highlight changes since
@@ -97,23 +102,19 @@ export default function Topology() {
             {compare && <><span><i style={{ background: LINK.added }} />link added</span><span><i style={{ background: LINK.removed }} />link removed</span></>}
           </div>}>
             {data.nodes.length === 0 ? <Empty>No CDP or LLDP neighbors in this snapshot.</Empty> :
-              <Chart option={option} height={560} onClick={(p) => { if (p.dataType === "node" && p.data.raw.managed) nav(`/devices/${p.data.id}`); }} />}
+              <Chart option={option} height={620} onClick={(p) => { if (p.dataType === "node" && p.data.raw.managed) nav(`/devices/${p.data.id}`); }} />}
           </Card>
-          {changed.length > 0 && (
-            <Card title="Link changes">
-              <table className="tbl dense">
-                <thead><tr><th>Change</th><th>A side</th><th>B side</th><th>Protocols</th></tr></thead>
-                <tbody>{changed.map((l: any, i: number) => (
-                  <tr key={i}><td><span className={`chg chg-${l.change}`}>{l.change}</span></td>
-                    <td>{l.source} <span className="mono muted">{l.source_interface}</span></td>
-                    <td>{l.target} <span className="mono muted">{l.target_interface}</span></td>
-                    <td>{l.protocols.join(", ")}</td></tr>
-                ))}</tbody>
-              </table>
-            </Card>
-          )}
+          <Card title="Links" sub={`${data.links.length}`}>
+            <DataGrid storageKey="topology.links" autoHeight rows={data.links} rowKey={(l: any) => `${l.source}|${l.source_interface}|${l.target}|${l.target_interface}`}
+              columns={[
+                { key: "source", label: "Device A" }, { key: "source_interface", label: "Interface A", mono: true },
+                { key: "target", label: "Device B" }, { key: "target_interface", label: "Interface B", mono: true },
+                { key: "protocols", label: "Learned by", text: (l: any) => l.protocols.join(", ") },
+                { key: "change", label: "Change", filter: "select", options: ["unchanged", "added", "removed"], render: (l: any) => l.change === "unchanged" ? <span className="faint">—</span> : <span className={`chg chg-${l.change}`}>{l.change}</span> },
+              ]} />
+          </Card>
         </>
       )}
-    </>
+    </div>
   );
 }

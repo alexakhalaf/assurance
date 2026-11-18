@@ -18,7 +18,7 @@ from ...db import get_db
 from ...exports import safe_cell
 from ...models import DeviceCollection, RawOutput, Snapshot, SnapshotStatus, StateRow
 from ...services import audit
-from ...services.diff import DIFFABLE, TABLES, SnapshotNotFound, diff_snapshots, diff_summary, render_text, resolve_ref
+from ...services.diff import DIFFABLE, TABLES, SnapshotNotFound, diff_snapshots, render_text, resolve_ref
 from ...services.diff import cache_clear as diff_cache_clear
 from ...services.snapshots import EmptyScope, WebhookTargetError, create_snapshot
 from ...storage import get_text
@@ -153,9 +153,18 @@ def get_table(
     snap = _get(db, ref)
     where = [StateRow.snapshot_id == snap.id, StateRow.table_name == table]
     if device:
-        where.append(StateRow.device_name.in_(device))
+        exact = [d for d in device if not d.startswith("~")]
+        contains = [d[1:] for d in device if d.startswith("~")]
+        if exact:
+            where.append(StateRow.device_name.in_(exact))
+        for d in contains:
+            where.append(func.lower(StateRow.device_name).like(_like(d.lower()), escape="\\"))
     for k, v in request.query_params.multi_items():
         if k in RESERVED:
+            continue
+        if k == "key":  # the row's natural key, not a data field
+            where.append(func.lower(StateRow.key).like(_like(v[1:].lower()), escape="\\") if v.startswith("~")
+                         else StateRow.key == v)
             continue
         if not FIELD_RE.match(k):
             raise HTTPException(422, f"Invalid filter field {k!r}")
@@ -319,9 +328,10 @@ def overview(_: Principal = Depends(viewer), db: Session = Depends(get_db),
     if latest is not None:
         since = latest.created_at
         prev_day = [s for s in recent if s.status in DIFFABLE and (since - s.created_at).total_seconds() <= 86400]
-        if len(prev_day) >= 2:
-            summ = diff_summary(db, prev_day[-1], prev_day[0])
-            top = {k: sum(v.values()) for k, v in summ["by_device"].items()}
+        # Sum the per-snapshot change counts stored at finalize: cheap at any fleet size.
+        for s in prev_day:
+            for dev, n in ((s.summary.get("changes") or {}).get("top_devices") or {}).items():
+                top[dev] = top.get(dev, 0) + n
     collected_failed = sorted(d.name for d in devices if d.last_collection_status == "failed")
     return {
         "devices": {"total": len(devices), "by_status": by("status"), "by_platform": by("platform"),

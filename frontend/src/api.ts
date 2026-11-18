@@ -78,7 +78,12 @@ export function download(path: string, params?: Params) {
       a.click();
       URL.revokeObjectURL(url);
     })
-    .catch((e) => alert(`Download failed: ${e.message}`));
+    .catch((e) => toast(`Download failed: ${e.message}`, "bad"));
+}
+
+/** Small app-wide notice, shown by the shell. */
+export function toast(message: string, tone: "good" | "bad" | "info" = "info") {
+  window.dispatchEvent(new CustomEvent("assurance:toast", { detail: { message, tone } }));
 }
 
 // ---- types

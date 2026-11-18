@@ -8,6 +8,8 @@ from __future__ import annotations
 import gzip
 import hashlib
 import logging
+import os
+import uuid
 from collections.abc import Iterator
 from functools import lru_cache
 from pathlib import Path
@@ -41,9 +43,14 @@ class FilesystemStore:
     def put(self, key: str, data: bytes) -> None:
         p = self._path(key)
         p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(p.suffix + ".tmp")
-        tmp.write_bytes(data)
-        tmp.replace(p)
+        # Unique temp name: content-addressed keys are shared, so several workers can write the same
+        # object (e.g. an empty output) at once; a shared temp file made one of them fail.
+        tmp = p.with_name(f"{p.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+        try:
+            tmp.write_bytes(data)
+            tmp.replace(p)
+        finally:
+            tmp.unlink(missing_ok=True)
 
     def get(self, key: str) -> bytes:
         return self._path(key).read_bytes()
