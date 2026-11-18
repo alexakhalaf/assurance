@@ -1,0 +1,129 @@
+# High-availability deployment. Stateful services are external: use a managed or operator-run
+# PostgreSQL 16 (HA), Redis with persistence, and an S3-compatible bucket.
+
+image:
+  repository: ghcr.io/alexakhalaf/assurance
+  tag: ""            # defaults to the chart appVersion
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# Secrets. Either name an existing Secret holding these keys, or let the chart create one from `secrets`.
+#   database-url, redis-url, s3-access-key, s3-secret-key, master-key
+#   optional: bootstrap-admin-password, webhook-secret, oidc-client-secret, smtp-password
+existingSecret: ""
+secrets:
+  databaseUrl: ""            # postgresql+psycopg://assurance:<pw>@pg-rw.db:5432/assurance?sslmode=require
+  redisUrl: ""               # redis://:<pw>@redis-master.cache:6379/0
+  s3AccessKey: ""
+  s3SecretKey: ""
+  masterKey: ""              # 32-byte base64 (assurance-admin gen-master-key). Back it up separately!
+  bootstrapAdminPassword: ""
+  webhookSecret: ""
+  oidcClientSecret: ""
+  smtpPassword: ""
+
+# Non-secret settings, passed as ASSURANCE_* environment variables (see the README table).
+config:
+  ENV: prod
+  LOG_LEVEL: INFO
+  OBJECT_STORE: s3
+  S3_ENDPOINT_URL: ""        # empty for AWS S3
+  S3_BUCKET: assurance
+  S3_REGION: us-east-1
+  COLLECTOR: live
+  SSH_HOST_KEY_POLICY: tofu
+  RETENTION_THIN_AFTER_DAYS: "7"   # then one routine snapshot per day
+  RETENTION_DAYS: "90"       # 0 keeps every snapshot; change-labelled ones and the newest are always kept
+  # WEBHOOK_ALLOWED_HOSTS: '["hooks.corp.example"]'   # private webhook targets allowed
+  TRUSTED_PROXIES: '["10.0.0.0/8"]'   # the ingress controller's pod network
+  # OTEL_ENDPOINT: http://otel-collector.observability:4318
+  # OIDC_ISSUER: https://login.microsoftonline.com/<tenant>/v2.0
+  # OIDC_CLIENT_ID: ""
+  # OIDC_REDIRECT_URI: https://assurance.example.net/api/v1/auth/oidc/callback
+  # OIDC_ROLE_MAP: '{"netops":"operator","netops-admins":"admin"}'
+  # SMTP_HOST: smtp.example.net
+  # SMTP_FROM: assurance@example.net
+
+api:
+  replicas: 2
+  resources:
+    requests: { cpu: 250m, memory: 384Mi }
+    limits: { memory: 1Gi }
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+  pdb: { minAvailable: 1 }
+  service:
+    type: ClusterIP
+    port: 80
+
+worker:
+  replicas: 3                # each worker runs one device job at a time
+  resources:
+    requests: { cpu: 500m, memory: 512Mi }
+    limits: { memory: 1536Mi }
+  pdb: { minAvailable: 1 }
+  autoscaling:
+    enabled: false
+    minReplicas: 3
+    maxReplicas: 20
+    targetCPUUtilizationPercentage: 60
+
+scheduler:
+  replicas: 2                # a Redis lock keeps exactly one active; the second takes over on failure
+  resources:
+    requests: { cpu: 50m, memory: 192Mi }
+    limits: { memory: 512Mi }
+
+migrations:
+  enabled: true              # runs `assurance-admin migrate` as a pre-install/pre-upgrade hook
+  backoffLimit: 2
+
+backup:
+  enabled: false
+  schedule: "15 2 * * *"
+  keep: 14                   # archives kept on the volume
+  objects: true
+  persistence:
+    existingClaim: ""
+    size: 50Gi
+    storageClass: ""
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: assurance.example.net
+  tls:
+    secretName: ""           # e.g. issued by cert-manager
+
+networkPolicy:
+  enabled: true
+  # Egress besides DNS: database, Redis, object store, devices (SSH), IdP, SMTP, OTLP collector.
+  # Empty allows all egress; list CIDRs to narrow it to your networks.
+  egressCIDRs: []
+  # Who may reach the API (NetworkPolicy peers). Empty allows any source, e.g.
+  #   - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ingress-nginx } }
+  apiFrom: []
+
+serviceMonitor:
+  enabled: false             # Prometheus Operator
+  interval: 30s
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile: { type: RuntimeDefault }
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities: { drop: [ALL] }
+
+nodeSelector: {}
+tolerations: []
+affinity: {}                 # default: spread replicas across nodes (see _helpers.tpl)
+topologySpread: true

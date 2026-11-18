@@ -1,0 +1,15 @@
+For address family: IPv4 Unicast
+BGP router identifier 10.10.0.1, local AS number 65010
+BGP table version is 25, main routing table version 25
+14 network entries using 3472 bytes of memory
+16 path entries using 2176 bytes of memory
+4/4 BGP path/bestpath attribute entries using 1152 bytes of memory
+2 BGP AS-PATH entries using 64 bytes of memory
+0 BGP route-map cache entries using 0 bytes of memory
+0 BGP filter-list cache entries using 0 bytes of memory
+BGP using 6864 total bytes of memory
+BGP activity 14/0 prefixes, 16/0 paths, scan interval 60 secs
+
+Neighbor        V           AS MsgRcvd MsgSent   TblVer  InQ OutQ Up/Down  State/PfxRcd
+10.10.0.11      4        65010    1220    1218       25    0    0 18:15:02        4
+10.10.2.2       4        65020    1301    1290       25    0    0 2d03h          12

@@ -1,0 +1,147 @@
+# Single-server deployment: PostgreSQL, Redis, S3 object store, API (+UI), collection workers, scheduler.
+#   cp .env.example .env        # set every password
+#   ./deploy/init-secrets.sh    # creates secrets/master.key
+#   docker compose up -d --build
+#   open https://$ASSURANCE_HOSTNAME  (user "admin", password ASSURANCE_BOOTSTRAP_ADMIN_PASSWORD)
+#
+# TLS: the "proxy" service (Caddy) terminates HTTPS on 443 and is the only port published.
+#   - a public DNS name: set ASSURANCE_TLS to your e-mail and Caddy gets a Let's Encrypt certificate;
+#   - an internal name: put your certificate and key in ./secrets/tls/ (cert.pem, key.pem)
+#     and set ASSURANCE_TLS=/run/tls/cert.pem /run/tls/key.pem in .env;
+#   - default (ASSURANCE_TLS=internal): Caddy's own CA, fine for a lab (browsers will warn).
+# The API itself listens only on the internal network (and 127.0.0.1:8000 for local checks).
+
+x-app: &app
+  image: assurance:${ASSURANCE_VERSION:-0.5.0}
+  build: .
+  restart: unless-stopped
+  init: true
+  env_file: .env
+  environment: &app-env
+    ASSURANCE_ENV: prod
+    ASSURANCE_DATABASE_URL: postgresql+psycopg://assurance:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/assurance
+    ASSURANCE_REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/0
+    ASSURANCE_OBJECT_STORE: s3
+    ASSURANCE_S3_ENDPOINT_URL: ${ASSURANCE_S3_ENDPOINT_URL:-http://objectstore:8333}
+    ASSURANCE_S3_ACCESS_KEY: ${S3_ACCESS_KEY:-assurance}
+    ASSURANCE_S3_SECRET_KEY: ${S3_SECRET_KEY:?set S3_SECRET_KEY}
+    ASSURANCE_MASTER_KEY_FILE: /run/secrets/master_key
+    ASSURANCE_JOB_BACKEND: rq
+  secrets: [master_key]
+  read_only: true
+  tmpfs: [/tmp, /home/assurance]
+  security_opt: ["no-new-privileges:true"]
+  depends_on:
+    migrate: { condition: service_completed_successfully }
+    redis: { condition: service_healthy }
+    objectstore: { condition: service_healthy }
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: assurance
+      POSTGRES_USER: assurance
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U assurance -d assurance"]
+      interval: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD}", "--appendonly", "yes"]
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    volumes: [redisdata:/data]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      interval: 5s
+      retries: 20
+
+  # Bundled S3-compatible store (SeaweedFS) for raw command output. Any S3 API store works instead
+  # (MinIO, Ceph RGW, AWS S3, StorageGRID): set ASSURANCE_S3_ENDPOINT_URL and drop this service.
+  # Its access keys are in secrets/s3.json, written by deploy/init-secrets.sh from .env.
+  objectstore:
+    image: chrislusf/seaweedfs:3.80
+    restart: unless-stopped
+    command: ["server", "-dir=/data", "-s3", "-s3.port=8333", "-s3.config=/run/secrets/s3_config",
+              "-master.volumeSizeLimitMB=1024", "-volume.max=0"]
+    secrets: [s3_config]
+    volumes: [objdata:/data]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8333/healthz || exit 1"]
+      interval: 5s
+      retries: 30
+
+  migrate:
+    <<: *app
+    restart: "no"
+    command: ["assurance-admin", "migrate"]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  api:
+    <<: *app
+    # Several processes so one slow request (a fleet-wide diff or export) never blocks the UI.
+    command: ["uvicorn", "--factory", "assurance.api.app:create_app", "--host", "0.0.0.0", "--port", "8000",
+              "--proxy-headers", "--forwarded-allow-ips", "*", "--no-server-header",
+              "--workers", "${ASSURANCE_API_WORKERS:-4}"]
+    environment:
+      <<: *app-env
+      # Only the proxy can reach the API port, so its X-Forwarded-For is believed (audit log, rate limit).
+      ASSURANCE_TRUSTED_PROXIES: '["172.16.0.0/12", "192.168.0.0/16", "10.0.0.0/8"]'
+    ports: ["127.0.0.1:${ASSURANCE_PORT:-8000}:8000"]
+
+  proxy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    ports: ["443:443", "80:80"]
+    environment:
+      ASSURANCE_HOSTNAME: ${ASSURANCE_HOSTNAME:?set ASSURANCE_HOSTNAME (the name users browse to)}
+      ASSURANCE_TLS: ${ASSURANCE_TLS:-internal}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./secrets/tls:/run/tls:ro
+      - caddydata:/data
+    depends_on: [api]
+
+  worker:
+    <<: *app
+    command: ["assurance-admin", "worker"]
+    deploy:
+      replicas: ${ASSURANCE_WORKERS:-2}
+    healthcheck:
+      disable: true
+
+  # Daily backup (database + stored outputs) into the "backups" volume, keeping 14 days. Copy them off
+  # the server, e.g. `docker compose cp backup:/backups ./backups` from a nightly cron. The master key
+  # is not in them: keep secrets/master.key somewhere safe, separately.
+  backup:
+    <<: *app
+    command: ["assurance-admin", "backup-loop", "/backups", "--keep-days", "${ASSURANCE_BACKUP_KEEP_DAYS:-14}"]
+    volumes: ["backups:/backups"]
+    healthcheck:
+      disable: true
+
+  scheduler:
+    <<: *app
+    command: ["assurance-admin", "scheduler"]
+    healthcheck:
+      disable: true
+
+secrets:
+  master_key:
+    file: ./secrets/master.key
+  s3_config:
+    file: ./secrets/s3.json
+
+volumes:
+  pgdata:
+  redisdata:
+  objdata:
+  caddydata:
+  backups:

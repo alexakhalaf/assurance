@@ -1,0 +1,55 @@
+
+ VLAN0100 is executing the rstp compatible Spanning Tree protocol
+  Bridge Identifier has priority 24576, sysid 100, address 5254.0012.3456
+  Configured hello time 2, max age 20, forward delay 15
+  We are the root of the spanning tree
+  Topology change flag not set, detected flag not set
+  Number of topology changes 4 last change occurred 120:33:10 ago
+          from Ethernet1/3
+  Times:  hold 1, topology change 35, notification 2
+          hello 2, max age 20, forward delay 15
+  Timers: hello 0, topology change 0, notification 0
+
+ Port 3 (Ethernet1/3) of VLAN0100 is designated forwarding
+   Port path cost 2, Port priority 128, Port Identifier 128.3
+   Designated root has priority 24676, address 5254.0012.3456
+   Designated bridge has priority 24676, address 5254.0012.3456
+   Designated port id is 128.3, designated path cost 0
+   Timers: message age 0, forward delay 0, hold 0
+   Number of transitions to forwarding state: 1
+   The port type is edge
+   Link type is point-to-point by default
+   BPDU: sent 368, received 0
+
+ Port 4096 (port-channel10) of VLAN0100 is designated forwarding
+   Port path cost 1, Port priority 128, Port Identifier 128.4096
+   Designated root has priority 24676, address 5254.0012.3456
+   Designated bridge has priority 24676, address 5254.0012.3456
+   Designated port id is 128.4096, designated path cost 0
+   Timers: message age 0, forward delay 0, hold 0
+   Number of transitions to forwarding state: 1
+   Link type is point-to-point by default
+   BPDU: sent 368, received 2
+
+ VLAN0200 is executing the rstp compatible Spanning Tree protocol
+  Bridge Identifier has priority 32768, sysid 200, address 5254.0012.3456
+  Configured hello time 2, max age 20, forward delay 15
+  Current root has priority 24776, address 5254.00ab.cdef
+  Root port is 4096 (port-channel10), cost of root path is 1
+  Topology change flag not set, detected flag not set
+  Number of topology changes 2 last change occurred 120:33:12 ago
+          from port-channel10
+  Times:  hold 1, topology change 35, notification 2
+          hello 2, max age 20, forward delay 15
+  Timers: hello 0, topology change 0, notification 0
+
+ Port 4096 (port-channel10) of VLAN0200 is root forwarding
+   Port path cost 1, Port priority 128, Port Identifier 128.4096
+   Designated root has priority 24776, address 5254.00ab.cdef
+   Designated bridge has priority 24776, address 5254.00ab.cdef
+   Designated port id is 128.4096, designated path cost 0
+   Timers: message age 3, forward delay 0, hold 0
+   Number of transitions to forwarding state: 1
+   Link type is point-to-point by default
+   BPDU: sent 2, received 368
+

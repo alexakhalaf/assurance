@@ -1,0 +1,629 @@
+"""Intent checks.
+
+Every completed snapshot is graded by a library of rules. A rule looks at the snapshot's state
+tables and reports violations (device, key, message) with a severity of `fail` or `warning`.
+
+  state rules  grade one snapshot ("every BGP session is Established")
+  delta rules  compare two snapshots ("no BGP session that was up went down"); used by pre/post
+               change verification
+  custom rules defined by users as data (JSON/YAML): a table, a filter, an assertion, a severity
+
+Results are stored per snapshot (violations only) with a per-rule summary in snapshot.summary.
+"""
+from __future__ import annotations
+
+import operator
+import re
+from collections import defaultdict
+from collections.abc import Callable
+from dataclasses import dataclass, field
+
+from sqlalchemy import delete, func, select
+from sqlalchemy.orm import Session
+
+from ..models import CheckResult, CheckRule, DeviceCollection, Snapshot, StateRow
+
+FAIL, WARNING = "fail", "warning"
+SEVERITIES = (FAIL, WARNING)
+
+
+# --------------------------------------------------------------- snapshot view
+
+
+class SnapshotData:
+    """View of one snapshot for the rules: tables[table][device][key] = row, plus device metadata.
+
+    Tables are loaded on first use, so a rule set that never reads routes or config never pulls them
+    into memory (those two are most of a snapshot's rows). Route counts per VRF come from SQL.
+    """
+
+    def __init__(self, db: Session, snap: Snapshot, tables: list[str] | None = None):
+        self.snapshot = snap
+        self._db = db
+        self._allowed = set(tables) if tables else None
+        self.tables: dict[str, dict[str, dict[str, dict]]] = {}
+        self.devices: dict[str, dict] = {}
+        self.collected: set[str] = set()
+        for name, meta, status in db.execute(select(
+                DeviceCollection.device_name, DeviceCollection.device_meta, DeviceCollection.status)
+                .where(DeviceCollection.snapshot_id == snap.id)):
+            self.devices[name] = {**(meta or {}), "status": status}
+            if status in ("ok", "partial"):
+                self.collected.add(name)
+        self._route_counts: dict[str, dict[str, int]] | None = None
+
+    def _load(self, table: str) -> dict[str, dict[str, dict]]:
+        if table not in self.tables:
+            data: dict[str, dict[str, dict]] = defaultdict(dict)
+            if self._allowed is None or table in self._allowed:
+                q = select(StateRow.device_name, StateRow.key, StateRow.data).where(
+                    StateRow.snapshot_id == self.snapshot.id, StateRow.table_name == table)
+                for d, k, row in self._db.execute(q.execution_options(yield_per=5000)):
+                    data[d][k] = row
+            self.tables[table] = data
+        return self.tables[table]
+
+    def rows(self, table: str):
+        t = self._load(table)
+        for device in sorted(self.collected):
+            for key, row in sorted(t.get(device, {}).items()):
+                yield device, key, row
+
+    def table(self, table: str, device: str) -> dict[str, dict]:
+        return self._load(table).get(device, {})
+
+    def route_counts(self, device: str) -> dict[str, int]:
+        """Routes per VRF, counted in the database."""
+        if self._route_counts is None:
+            self._route_counts = defaultdict(dict)
+            vrf = StateRow.data["vrf"].as_string()
+            for d, v, n in self._db.execute(
+                    select(StateRow.device_name, vrf, func.count())
+                    .where(StateRow.snapshot_id == self.snapshot.id, StateRow.table_name == "routes")
+                    .group_by(StateRow.device_name, vrf)):
+                self._route_counts[d][v] = n
+        return self._route_counts.get(device, {})
+
+
+@dataclass
+class Violation:
+    device: str
+    key: str
+    message: str
+    data: dict = field(default_factory=dict)
+
+
+@dataclass
+class Rule:
+    id: str
+    name: str
+    description: str
+    severity: str
+    kind: str  # state | delta
+    tables: tuple[str, ...]
+    fn: Callable
+    platforms: tuple[str, ...] = ()
+    builtin: bool = True
+    definition: dict | None = None
+
+    def applies(self, meta: dict) -> bool:
+        return not self.platforms or meta.get("platform") in self.platforms
+
+
+# ------------------------------------------------------------ built-in rules
+
+_SPARE = re.compile(r"(?i)\b(spare|unused|reserved|shut)\b")
+
+
+def _bgp_established(s: SnapshotData, **_):
+    for d, k, r in s.rows("bgp"):
+        if r.get("state") != "established":
+            yield Violation(d, k, f"BGP neighbor {r['neighbor']} (AS {r.get('remote_as')}, vrf {r['vrf']}) "
+                                  f"is {r.get('state')}", r)
+
+
+def _ospf_full(s: SnapshotData, **_):
+    for d, k, r in s.rows("ospf"):
+        if r.get("state") not in ("full", "2way"):
+            yield Violation(d, k, f"OSPF neighbor {r['neighbor_id']} on {r['interface']} is {r.get('state')}", r)
+
+
+def _interface_up_down(s: SnapshotData, **_):
+    for d, k, r in s.rows("interfaces"):
+        spare = _SPARE.search(r.get("description") or "")
+        if r.get("admin_status") == "up" and r.get("oper_status") != "up" and not spare:
+            yield Violation(d, k, f"{k} is enabled but {r.get('oper_status')}", r)
+
+
+def _link_pairs(s: SnapshotData):
+    """(device, local_if, remote_device, remote_if) for neighbors whose far end is also collected."""
+    seen = set()
+    for d, _, n in s.rows("neighbors"):
+        rd, ri = n.get("remote_device"), n.get("remote_interface")
+        if rd not in s.collected or not ri:
+            continue
+        pair = tuple(sorted([(d, n["local_interface"]), (rd, ri)]))
+        if pair in seen:
+            continue
+        seen.add(pair)
+        yield d, n["local_interface"], rd, ri
+
+
+def _link_attr_mismatch(attr: str):
+    def rule(s: SnapshotData, **_):
+        for d, li, rd, ri in _link_pairs(s):
+            a = s.table("interfaces", d).get(li, {}).get(attr)
+            b = s.table("interfaces", rd).get(ri, {}).get(attr)
+            if a is not None and b is not None and a != b:
+                yield Violation(d, li, f"{attr} mismatch on link {d} {li} ({a}) <-> {rd} {ri} ({b})",
+                                {"local": a, "remote": b, "remote_device": rd, "remote_interface": ri})
+    return rule
+
+
+def _config_forbid(pattern: str, what: str):
+    rx = re.compile(pattern)
+
+    def rule(s: SnapshotData, **_):
+        for d in sorted(s.collected):
+            cfg = s.table("config", d)
+            if not cfg:
+                continue
+            for key in cfg:
+                if rx.search(key):
+                    yield Violation(d, key, f"{what}: '{key}'")
+    return rule
+
+
+def _config_require(pattern: str, what: str, platforms=()):
+    rx = re.compile(pattern)
+
+    def rule(s: SnapshotData, **_):
+        for d in sorted(s.collected):
+            if platforms and s.devices.get(d, {}).get("platform") not in platforms:
+                continue
+            cfg = s.table("config", d)
+            if cfg and not any(rx.search(k) for k in cfg):
+                yield Violation(d, "config", f"{what} is missing")
+    return rule
+
+
+def _collection_ok(s: SnapshotData, **_):
+    for d, meta in sorted(s.devices.items()):
+        if meta.get("status") not in ("ok",):
+            yield Violation(d, "collection", f"collection was {meta.get('status')}", {"status": meta.get("status")})
+
+
+def _portchannel_up(s: SnapshotData, **_):
+    for d, k, r in s.rows("portchannels"):
+        if r.get("oper_status") != "up":
+            yield Violation(d, k, f"{k} is {r.get('oper_status')}", r)
+
+
+def _portchannel_members(s: SnapshotData, **_):
+    for d, k, r in s.rows("portchannels"):
+        if r.get("members_down"):
+            yield Violation(d, k, f"{k}: member(s) not bundled: {', '.join(r['members_down'])}", r)
+
+
+def _ntp_synchronized(s: SnapshotData, **_):
+    for d in sorted(s.collected):
+        peers = s.table("ntp", d)
+        if peers and not any(p.get("synchronized") for p in peers.values()):
+            yield Violation(d, "ntp", f"not synchronized to any of {len(peers)} NTP peer(s)",
+                            {"peers": sorted(peers)})
+
+
+def _fhrp_redundant(s: SnapshotData, **_):
+    for d, k, r in s.rows("fhrp"):
+        if r.get("state") not in ("active", "standby", "master", "backup"):
+            yield Violation(d, k, f"{r['protocol'].upper()} group {r['group']} on {r['interface']} "
+                                  f"is {r.get('state')}", r)
+        elif r.get("protocol") == "hsrp" and not r.get("standby_router"):
+            yield Violation(d, k, f"HSRP group {r['group']} on {r['interface']} has no standby router", r)
+
+
+def _snmp_rw(s: SnapshotData, **_):
+    for d, k, r in s.rows("snmp"):
+        if r.get("kind") == "community" and r.get("access") == "rw":
+            yield Violation(d, k, f"{r['name']} is read-write", r)
+
+
+def _snmp_acl(s: SnapshotData, **_):
+    for d, k, r in s.rows("snmp"):
+        if r.get("kind") == "community" and not r.get("acl"):
+            yield Violation(d, k, f"{r['name']} ({r.get('access')}) has no access list", r)
+
+
+# ---- delta rules (pre -> post)
+
+
+def _bgp_lost(s: SnapshotData, prev: SnapshotData, **_):
+    for d, k, r in prev.rows("bgp"):
+        if d not in s.collected or r.get("state") != "established":
+            continue
+        now = s.table("bgp", d).get(k)
+        if now is None or now.get("state") != "established":
+            yield Violation(d, k, f"BGP neighbor {r['neighbor']} was established, now "
+                                  f"{now.get('state') if now else 'gone'}", {"before": r, "after": now})
+
+
+def _ospf_lost(s: SnapshotData, prev: SnapshotData, **_):
+    for d, k, r in prev.rows("ospf"):
+        if d not in s.collected or r.get("state") != "full":
+            continue
+        now = s.table("ospf", d).get(k)
+        if now is None or now.get("state") != "full":
+            yield Violation(d, k, f"OSPF neighbor {r['neighbor_id']} on {r['interface']} was full, now "
+                                  f"{now.get('state') if now else 'gone'}", {"before": r, "after": now})
+
+
+def _interface_went_down(s: SnapshotData, prev: SnapshotData, **_):
+    for d, k, r in prev.rows("interfaces"):
+        if d not in s.collected or r.get("oper_status") != "up":
+            continue
+        now = s.table("interfaces", d).get(k)
+        if now is None or now.get("oper_status") != "up":
+            yield Violation(d, k, f"{k} was up, now {now.get('oper_status') if now else 'gone'}",
+                            {"before": r, "after": now})
+
+
+def _neighbor_lost(s: SnapshotData, prev: SnapshotData, **_):
+    for d, k, r in prev.rows("neighbors"):
+        if d in s.collected and k not in s.table("neighbors", d):
+            yield Violation(d, k, f"{r['protocol'].upper()} neighbor {r['remote_device']} on "
+                                  f"{r['local_interface']} disappeared", r)
+
+
+def _stp_root_changed(s: SnapshotData, prev: SnapshotData, **_):
+    for d, k, r in prev.rows("stp"):
+        if d not in s.collected:
+            continue
+        now = s.table("stp", d).get(k)
+        if now and now.get("root_address") != r.get("root_address"):
+            yield Violation(d, k, f"spanning-tree root for {k} moved from {r.get('root_address')} "
+                                  f"to {now.get('root_address')}", {"before": r, "after": now})
+
+
+def _fhrp_state_changed(s: SnapshotData, prev: SnapshotData, **_):
+    for d, k, r in prev.rows("fhrp"):
+        if d not in s.collected:
+            continue
+        now = s.table("fhrp", d).get(k)
+        if now is None or now.get("state") != r.get("state"):
+            yield Violation(d, k, f"{r['protocol'].upper()} group {r['group']} on {r['interface']} went from "
+                                  f"{r.get('state')} to {now.get('state') if now else 'gone'}",
+                            {"before": r, "after": now})
+
+
+def _portchannel_member_lost(s: SnapshotData, prev: SnapshotData, **_):
+    for d, k, r in prev.rows("portchannels"):
+        if d not in s.collected:
+            continue
+        now = s.table("portchannels", d).get(k) or {}
+        lost = sorted(set(r.get("members_bundled") or []) - set(now.get("members_bundled") or []))
+        if lost:
+            yield Violation(d, k, f"{k} lost bundled member(s): {', '.join(lost)}", {"before": r, "after": now or None})
+
+
+def _route_count_drop(s: SnapshotData, prev: SnapshotData, threshold_pct: float = 2.0, **_):
+    for d in sorted(prev.collected & s.collected):
+        before, after = prev.route_counts(d), s.route_counts(d)
+        for vrf, n in before.items():
+            m = after.get(vrf, 0)
+            if n and (n - m) * 100.0 / n > threshold_pct:
+                yield Violation(d, vrf, f"routes in vrf {vrf} dropped from {n} to {m} "
+                                        f"({(n - m) * 100.0 / n:.1f}% > {threshold_pct}%)",
+                                {"before": n, "after": m})
+
+
+BUILTIN: list[Rule] = [
+    Rule("bgp-established", "BGP sessions established", "Every BGP neighbor is in Established state.",
+         FAIL, "state", ("bgp",), _bgp_established),
+    Rule("ospf-full", "OSPF adjacencies full", "Every OSPF neighbor is FULL (or 2WAY between DROTHERs).",
+         FAIL, "state", ("ospf",), _ospf_full),
+    Rule("interface-up-down", "Enabled interfaces are up",
+         "Interfaces that are admin up are operationally up (descriptions with spare/unused are ignored).",
+         WARNING, "state", ("interfaces",), _interface_up_down),
+    Rule("link-mtu-mismatch", "MTU matches on both ends of a link",
+         "For CDP/LLDP links between collected devices, both interfaces have the same MTU.",
+         FAIL, "state", ("neighbors", "interfaces"), _link_attr_mismatch("mtu")),
+    Rule("link-duplex-mismatch", "Duplex matches on both ends of a link",
+         "For CDP/LLDP links between collected devices, both interfaces have the same duplex.",
+         FAIL, "state", ("neighbors", "interfaces"), _link_attr_mismatch("duplex")),
+    Rule("config-no-http-server", "HTTP server disabled", "No 'ip http server' or 'feature telnet' in the config.",
+         FAIL, "state", ("config",), _config_forbid(r"^(ip http server|feature telnet)$", "insecure service enabled")),
+    Rule("config-ntp", "NTP servers configured", "At least one 'ntp server' line in the config.",
+         FAIL, "state", ("config",), _config_require(r"^ntp server ", "NTP server")),
+    Rule("config-ssh-v2", "SSH version 2", "IOS-XE devices have 'ip ssh version 2'.",
+         WARNING, "state", ("config",), _config_require(r"^ip ssh version 2$", "'ip ssh version 2'", ("iosxe",)),
+         platforms=("iosxe",)),
+    Rule("config-aaa", "AAA enabled", "IOS-XE has 'aaa new-model'; NX-OS has 'feature tacacs+'.",
+         WARNING, "state", ("config",), _config_require(r"^(aaa new-model|feature tacacs\+)$", "AAA (TACACS+)")),
+    Rule("collection-ok", "Collection succeeded", "Every device in scope was collected without errors.",
+         WARNING, "state", (), _collection_ok),
+    Rule("portchannel-up", "Port-channels up", "Every port-channel is operationally up.",
+         FAIL, "state", ("portchannels",), _portchannel_up),
+    Rule("portchannel-members-bundled", "Port-channel members bundled",
+         "Every configured member of a port-channel is bundled.", WARNING, "state", ("portchannels",),
+         _portchannel_members),
+    Rule("ntp-synchronized", "NTP synchronized", "Devices with NTP peers are synchronized to one of them.",
+         FAIL, "state", ("ntp",), _ntp_synchronized),
+    Rule("snmp-no-rw-community", "No read-write SNMP community", "SNMP communities are read-only.",
+         FAIL, "state", ("snmp",), _snmp_rw),
+    Rule("snmp-community-acl", "SNMP communities restricted", "Every SNMP community is limited by an access list.",
+         WARNING, "state", ("snmp",), _snmp_acl),
+    Rule("fhrp-redundant", "Gateway redundancy healthy",
+         "HSRP/VRRP groups are active or standby, and HSRP groups have a standby router.",
+         WARNING, "state", ("fhrp",), _fhrp_redundant),
+    # delta rules
+    Rule("bgp-neighbor-lost", "No BGP session lost", "No BGP neighbor that was Established is down or gone.",
+         FAIL, "delta", ("bgp",), _bgp_lost),
+    Rule("ospf-neighbor-lost", "No OSPF adjacency lost", "No OSPF neighbor that was FULL is down or gone.",
+         FAIL, "delta", ("ospf",), _ospf_lost),
+    Rule("interface-went-down", "No interface went down", "No interface that was up is down or gone.",
+         FAIL, "delta", ("interfaces",), _interface_went_down),
+    Rule("route-count-drop", "Route count stable", "Routes per VRF did not drop by more than the threshold (2%).",
+         FAIL, "delta", ("routes",), _route_count_drop),
+    Rule("neighbor-lost", "No CDP/LLDP neighbor lost", "No CDP or LLDP neighbor disappeared.",
+         WARNING, "delta", ("neighbors",), _neighbor_lost),
+    Rule("stp-root-changed", "Spanning-tree root unchanged", "No VLAN or MST instance has a new root bridge.",
+         FAIL, "delta", ("stp",), _stp_root_changed),
+    Rule("fhrp-state-changed", "Gateway roles unchanged", "No HSRP/VRRP group changed state (e.g. active to standby).",
+         WARNING, "delta", ("fhrp",), _fhrp_state_changed),
+    Rule("portchannel-member-lost", "No port-channel member lost", "No bundled port-channel member left its bundle.",
+         FAIL, "delta", ("portchannels",), _portchannel_member_lost),
+]
+BUILTIN_BY_ID = {r.id: r for r in BUILTIN}
+
+
+# --------------------------------------------------------------- custom rules
+
+_OPS: dict[str, Callable] = {
+    "eq": lambda a, b: a == b or str(a) == str(b),
+    "ne": lambda a, b: not (a == b or str(a) == str(b)),
+    "in": lambda a, b: a in b or str(a) in [str(x) for x in b],
+    "not_in": lambda a, b: not (a in b or str(a) in [str(x) for x in b]),
+    "regex": lambda a, b: a is not None and re.search(b, str(a)) is not None,
+    "not_regex": lambda a, b: a is None or re.search(b, str(a)) is None,
+    "gt": lambda a, b: a is not None and operator.gt(float(a), float(b)),
+    "gte": lambda a, b: a is not None and operator.ge(float(a), float(b)),
+    "lt": lambda a, b: a is not None and operator.lt(float(a), float(b)),
+    "lte": lambda a, b: a is not None and operator.le(float(a), float(b)),
+    "exists": lambda a, b: a not in (None, "", []),
+    "not_exists": lambda a, b: a in (None, "", []),
+    "contains": lambda a, b: a is not None and (b in a if isinstance(a, list) else str(b) in str(a)),
+}
+CUSTOM_KINDS = ("row", "config_require", "config_forbid")
+
+
+class RuleError(ValueError):
+    pass
+
+
+def validate_definition(defn: dict) -> dict:
+    """Custom rule definition:
+
+      {"kind": "row", "table": "interfaces",
+       "where": [{"field": "description", "op": "regex", "value": "uplink"}],
+       "assert": {"field": "mtu", "op": "eq", "value": 9216},
+       "scope": {"platform": "nxos", "site": "YYC-DC1", "role": "dc-spine"},
+       "message": "uplink MTU is {mtu}"}
+
+      {"kind": "config_require", "pattern": "^logging host ", "scope": {...}}
+      {"kind": "config_forbid",  "pattern": "^snmp-server community .* RW"}
+    """
+    from .diff import TABLES
+
+    kind = defn.get("kind", "row")
+    if kind not in CUSTOM_KINDS:
+        raise RuleError(f"kind must be one of {', '.join(CUSTOM_KINDS)}")
+    scope = defn.get("scope") or {}
+    if not isinstance(scope, dict) or set(scope) - {"platform", "site", "role", "devices"}:
+        raise RuleError("scope keys: platform, site, role, devices")
+    if kind == "row":
+        if defn.get("table") not in TABLES:
+            raise RuleError(f"table must be one of {', '.join(TABLES)}")
+        conds = list(defn.get("where") or []) + [defn.get("assert") or {}]
+        if not defn.get("assert"):
+            raise RuleError("row rules need an 'assert' condition")
+        for c in conds:
+            if not isinstance(c, dict) or "field" not in c or c.get("op") not in _OPS:
+                raise RuleError(f"each condition needs field and op ({', '.join(_OPS)})")
+            if c["op"] in ("regex", "not_regex"):
+                _compile(c.get("value"))
+    else:
+        _compile(defn.get("pattern"))
+    return {**defn, "kind": kind, "scope": scope}
+
+
+def _compile(p):
+    try:
+        return re.compile(str(p))
+    except re.error as e:
+        raise RuleError(f"invalid regex {p!r}: {e}") from e
+
+
+def _in_scope(meta: dict, scope: dict, device: str) -> bool:
+    if scope.get("devices") and device not in scope["devices"]:
+        return False
+    return all(meta.get(k) == v for k, v in scope.items() if k != "devices")
+
+
+def _custom_fn(defn: dict):
+    scope = defn.get("scope") or {}
+    kind = defn["kind"]
+
+    def rule(s: SnapshotData, **_):
+        if kind == "row":
+            where, cond = defn.get("where") or [], defn["assert"]
+            for d, k, r in s.rows(defn["table"]):
+                if not _in_scope(s.devices.get(d, {}), scope, d):
+                    continue
+                if not all(_OPS[c["op"]](r.get(c["field"]), c.get("value")) for c in where):
+                    continue
+                try:
+                    ok = _OPS[cond["op"]](r.get(cond["field"]), cond.get("value"))
+                except (TypeError, ValueError):
+                    ok = False
+                if not ok:
+                    msg = defn.get("message") or (f"{cond['field']} is {r.get(cond['field'])!r}, "
+                                                  f"expected {cond['op']} {cond.get('value')!r}")
+                    try:
+                        msg = msg.format(**r)
+                    except (KeyError, IndexError, ValueError):
+                        pass
+                    yield Violation(d, k, msg, r)
+        else:
+            rx = re.compile(defn["pattern"])
+            for d in sorted(s.collected):
+                if not _in_scope(s.devices.get(d, {}), scope, d):
+                    continue
+                cfg = s.table("config", d)
+                if not cfg:
+                    continue
+                hits = [k for k in cfg if rx.search(k) or any(rx.search(line) for line in cfg[k]["lines"])]
+                if kind == "config_require" and not hits:
+                    yield Violation(d, "config", defn.get("message") or f"no config line matches {defn['pattern']!r}")
+                if kind == "config_forbid":
+                    for h in hits:
+                        yield Violation(d, h, defn.get("message") or f"forbidden config matches {defn['pattern']!r}")
+    return rule
+
+
+def custom_rule(row: CheckRule) -> Rule:
+    defn = row.definition
+    tables = (defn["table"],) if defn["kind"] == "row" else ("config",)
+    return Rule(f"custom:{row.name}", row.title or row.name, row.description or "", row.severity, "state",
+                tables, _custom_fn(defn), builtin=False, definition=defn)
+
+
+def active_rules(db: Session, kind: str | None = None) -> list[Rule]:
+    overrides = {r.name: r for r in db.scalars(select(CheckRule))}
+    rules = []
+    for r in BUILTIN:
+        o = overrides.get(r.id)
+        if o is not None and o.kind == "builtin" and not o.enabled:
+            continue
+        rules.append(r)
+    for o in overrides.values():
+        if o.kind == "custom" and o.enabled:
+            rules.append(custom_rule(o))
+    return [r for r in rules if kind is None or r.kind == kind]
+
+
+# ------------------------------------------------------------------ running
+
+
+def evaluate(rules: list[Rule], s: SnapshotData, prev: SnapshotData | None = None, **params) -> dict:
+    """Returns {"rules": {id: {...summary, violations: [...]}}, "fail": n, "warning": n}."""
+    out = {"rules": {}, "fail": 0, "warning": 0}
+    for rule in rules:
+        if rule.kind == "delta" and prev is None:
+            continue
+        try:
+            vs = list(rule.fn(s, prev=prev, **params))
+            error = None
+        except Exception as e:  # a broken custom rule must not break grading
+            vs, error = [], f"{type(e).__name__}: {e}"
+        vs = [v for v in vs if rule.applies(s.devices.get(v.device, {}))]
+        out["rules"][rule.id] = {
+            "name": rule.name, "description": rule.description, "severity": rule.severity, "kind": rule.kind,
+            "status": "error" if error else ("pass" if not vs else rule.severity), "error": error,
+            "violations": [v.__dict__ for v in vs],
+        }
+        if vs:
+            out[rule.severity] += len(vs)
+    return out
+
+
+def run_snapshot_checks(db: Session, snap: Snapshot) -> dict:
+    """Grade a snapshot with all active state rules and store the violations."""
+    result = evaluate(active_rules(db, "state"), SnapshotData(db, snap))
+    db.execute(delete(CheckResult).where(CheckResult.snapshot_id == snap.id))
+    for rid, r in result["rules"].items():
+        for v in r["violations"]:
+            db.add(CheckResult(snapshot_id=snap.id, rule=rid, device=v["device"], key=v["key"][:512],
+                               severity=r["severity"], message=v["message"][:1000], data=v["data"]))
+    summary = {
+        "fail": result["fail"], "warning": result["warning"],
+        "rules": {rid: {"status": r["status"], "severity": r["severity"], "violations": len(r["violations"])}
+                  for rid, r in result["rules"].items()},
+        "devices": _per_device(result),
+    }
+    return summary
+
+
+def _per_device(result: dict) -> dict[str, dict]:
+    out: dict[str, dict] = defaultdict(lambda: {"fail": 0, "warning": 0})
+    for r in result["rules"].values():
+        for v in r["violations"]:
+            out[v["device"]][r["severity"]] += 1
+    return dict(out)
+
+
+def profile_for_label(db: Session, label: str | None):
+    """The profile whose label_prefix is the longest prefix of label, if any."""
+    from ..models import CheckProfile
+
+    if not label:
+        return None
+    best = None
+    for p in db.scalars(select(CheckProfile).where(CheckProfile.label_prefix.is_not(None))):
+        if label.startswith(p.label_prefix) and (best is None or len(p.label_prefix) > len(best.label_prefix)):
+            best = p
+    return best
+
+
+def validate_profile_rules(db: Session, rules: list[str]) -> list[str]:
+    known = {r.id for r in BUILTIN} | {f"custom:{n}" for n in db.scalars(
+        select(CheckRule.name).where(CheckRule.kind == "custom"))}
+    bad = sorted(set(rules) - known)
+    if bad:
+        raise RuleError(f"unknown rule(s): {', '.join(bad)}")
+    return sorted(set(rules))
+
+
+def prepost(db: Session, pre: Snapshot, post: Snapshot, route_drop_pct: float | None = None,
+            profile=None) -> dict:
+    """Change verification: delta rules between pre and post, plus state failures new in post.
+
+    With a profile, only its rules are evaluated, its route-drop threshold applies (unless one is
+    given), and in strict mode warnings fail the verification as well.
+    """
+    from .diff import diff_summary
+
+    wanted = set(profile.rules) if profile is not None and profile.rules else None
+    if route_drop_pct is None:
+        route_drop_pct = profile.route_drop_pct if profile is not None else 2.0
+
+    def pick(kind):
+        return [r for r in active_rules(db, kind) if wanted is None or r.id in wanted]
+
+    s_pre, s_post = SnapshotData(db, pre), SnapshotData(db, post)
+    delta = evaluate(pick("delta"), s_post, prev=s_pre, threshold_pct=route_drop_pct)
+    state_rules = pick("state")
+    before = evaluate(state_rules, s_pre)
+    after = evaluate(state_rules, s_post)
+    new_failures = {}
+    for rid, r in after["rules"].items():
+        old = {(v["device"], v["key"]) for v in before["rules"].get(rid, {}).get("violations", [])}
+        added = [v for v in r["violations"] if (v["device"], v["key"]) not in old]
+        if added:
+            new_failures[rid] = {**r, "violations": added}
+    checks = {**delta["rules"], **{f"new:{k}": {**v, "name": f"New: {v['name']}"} for k, v in new_failures.items()}}
+    fails = sum(len(r["violations"]) for r in checks.values() if r["severity"] == FAIL)
+    warns = sum(len(r["violations"]) for r in checks.values() if r["severity"] == WARNING)
+    d = {"summary": diff_summary(db, pre, post)}
+    missing = sorted(s_pre.collected - s_post.collected)
+    strict = bool(profile is not None and profile.strict)
+    return {
+        "result": "fail" if fails or missing or (strict and warns) else ("warning" if warns else "pass"),
+        "profile": {"name": profile.name, "strict": strict, "rules": sorted(wanted) if wanted else "all",
+                    "route_drop_pct": route_drop_pct} if profile is not None else None,
+        "pre": {"id": pre.id, "created_at": pre.created_at.isoformat(), "labels": pre.labels},
+        "post": {"id": post.id, "created_at": post.created_at.isoformat(), "labels": post.labels},
+        "fail": fails, "warning": warns,
+        "devices_not_collected_in_post": missing,
+        "checks": checks,
+        "diff_summary": d["summary"],
+    }

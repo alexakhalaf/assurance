@@ -1,0 +1,67 @@
+{{- if .Values.backup.enabled }}
+{{- if not .Values.backup.persistence.existingClaim }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "assurance.fullname" . }}-backups
+  labels: {{- include "assurance.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with .Values.backup.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.backup.persistence.size }}
+---
+{{- end }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "assurance.fullname" . }}-backup
+  labels: {{- include "assurance.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels: {{- include "assurance.selector" (dict "root" . "component" "backup") | nindent 12 }}
+        spec:
+          restartPolicy: Never
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets: {{ toYaml . | nindent 12 }}
+          {{- end }}
+          automountServiceAccountToken: false
+          securityContext: {{- toYaml .Values.podSecurityContext | nindent 12 }}
+          containers:
+            - name: backup
+              image: {{ include "assurance.image" . }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              workingDir: /backups
+              command: ["sh", "-c"]
+              args:
+                - >-
+                  assurance-admin backup {{ if not .Values.backup.objects }}--no-objects{{ end }} &&
+                  ls -1t /backups/assurance-backup-*.tar | tail -n +{{ add 1 .Values.backup.keep }} | xargs -r rm -f --
+              env: {{- include "assurance.env" . | nindent 16 }}
+              volumeMounts:
+                {{- include "assurance.mounts" . | nindent 16 }}
+                - { name: backups, mountPath: /backups }
+              securityContext: {{- toYaml .Values.securityContext | nindent 16 }}
+              resources:
+                requests: { cpu: 100m, memory: 256Mi }
+                limits: { memory: 1Gi }
+          volumes:
+            {{- include "assurance.volumes" . | nindent 12 }}
+            - name: backups
+              persistentVolumeClaim:
+                claimName: {{ .Values.backup.persistence.existingClaim | default (printf "%s-backups" (include "assurance.fullname" .)) }}
+{{- end }}

@@ -1,0 +1,252 @@
+"""Server-side administration: `assurance-admin <command>`."""
+from __future__ import annotations
+
+import getpass
+import logging
+import os
+import sys
+from pathlib import Path
+
+import typer
+from sqlalchemy import select
+
+app = typer.Typer(help="Assurance server administration", no_args_is_help=True)
+
+
+def _alembic_cfg():
+    from alembic.config import Config
+
+    pkg = Path(__file__).resolve().parent.parent
+    cfg = Config()
+    cfg.set_main_option("script_location", str(pkg / "migrations"))
+    from ..config import get_settings
+
+    cfg.set_main_option("sqlalchemy.url", get_settings().database_url.replace("%", "%%"))
+    return cfg
+
+
+@app.command()
+def migrate(revision: str = "head"):
+    """Apply database migrations, then create the first admin if ASSURANCE_BOOTSTRAP_ADMIN_PASSWORD is set."""
+    from alembic import command
+
+    command.upgrade(_alembic_cfg(), revision)
+    typer.echo(f"database at {revision}")
+    _bootstrap_admin()
+
+
+def _bootstrap_admin() -> None:
+    from ..config import get_settings
+    from ..db import session_scope
+    from ..models import Role, User
+    from ..security.passwords import hash_password
+
+    pw = get_settings().bootstrap_admin_password
+    if not pw:
+        return
+    with session_scope() as db:
+        if db.scalar(select(User).limit(1)) is None:
+            db.add(User(username="admin", password_hash=hash_password(pw), role=Role.admin))
+            typer.echo("created initial user 'admin' (change its password after first login)")
+
+
+@app.command("create-user")
+def create_user(username: str, role: str = typer.Option("viewer", help="viewer | operator | admin"),
+                password: str = typer.Option(None, help="Prompted when omitted")):
+    """Create a local user."""
+    from ..db import session_scope
+    from ..models import Role, User
+    from ..security.passwords import hash_password, validate_password_strength
+
+    role_v = Role(role)
+    if password is None:
+        password = getpass.getpass("Password: ")
+        if password != getpass.getpass("Repeat: "):
+            raise typer.BadParameter("passwords differ")
+    validate_password_strength(password)
+    with session_scope() as db:
+        if db.scalar(select(User).where(User.username == username)):
+            typer.echo(f"user {username} exists", err=True)
+            raise typer.Exit(1)
+        db.add(User(username=username, password_hash=hash_password(password), role=role_v))
+    typer.echo(f"created {role_v} {username}")
+
+
+@app.command("reset-password")
+def reset_password(username: str):
+    """Set a new password and unlock the account."""
+    from ..db import session_scope
+    from ..models import User
+    from ..security.passwords import hash_password, validate_password_strength
+
+    pw = getpass.getpass("New password: ")
+    validate_password_strength(pw)
+    with session_scope() as db:
+        u = db.scalar(select(User).where(User.username == username))
+        if u is None:
+            raise typer.Exit(1)
+        u.password_hash, u.failed_logins, u.locked_until = hash_password(pw), 0, None
+    typer.echo("password updated")
+
+
+@app.command("gen-master-key")
+def gen_master_key(out: Path = typer.Option(None, help="Write to this file (mode 0600) instead of stdout")):
+    """Generate a credential-store master key. Keep it outside the database and back it up:
+    without it, stored device credentials cannot be decrypted."""
+    from ..security.crypto import generate_master_key
+
+    key = generate_master_key()
+    if out:
+        out.write_text(key + "\n")
+        os.chmod(out, 0o600)
+        typer.echo(f"wrote {out}")
+    else:
+        typer.echo(key)
+
+
+@app.command()
+def worker(burst: bool = typer.Option(False, help="Exit when the queue is empty")):
+    """Run a collection worker (RQ)."""
+    from rq import Worker
+
+    from .. import tracing
+    from ..config import get_settings
+    from ..jobs import get_queue, redis_conn
+    from ..logging_setup import configure_logging
+
+    s = get_settings()
+    configure_logging(s.log_level, s.log_json)
+    tracing.setup("assurance-worker")
+    Worker([get_queue()], connection=redis_conn()).work(burst=burst, with_scheduler=False)
+
+
+@app.command()
+def scheduler(interval: float = 20.0):
+    """Run the schedule loop (run 1-2 replicas; a Redis lock keeps one active)."""
+    from .. import tracing
+    from ..config import get_settings
+    from ..logging_setup import configure_logging
+    from ..services.schedules import scheduler_loop
+
+    s = get_settings()
+    configure_logging(s.log_level, s.log_json)
+    tracing.setup("assurance-scheduler")
+    scheduler_loop(interval)
+
+
+@app.command()
+def prune(keep_days: int = typer.Option(30, help="Delete unlabelled snapshots older than this"),
+          dry_run: bool = typer.Option(True, "--dry-run/--apply"),
+          thin_after_days: int = typer.Option(0, help="Keep one snapshot per day once older than this")):
+    """Retention: delete old snapshots. Labelled snapshots (change evidence) and the newest are kept."""
+    from ..services.retention import prune as do_prune
+
+    r = do_prune(keep_days, dry_run, thin_after_days)
+    typer.echo(f"{r['expired']} snapshot(s) older than {keep_days} days without labels")
+    if thin_after_days:
+        typer.echo(f"{r['thinned']} more thinned to one per day after {thin_after_days} days")
+    if not dry_run:
+        typer.echo(f"deleted {r['deleted']}")
+    # Raw objects are content-addressed and shared between snapshots: `gc-objects` removes orphans.
+
+
+@app.command("gc-objects")
+def gc_objects(grace_hours: float = typer.Option(24, help="Keep orphans newer than this"),
+               dry_run: bool = typer.Option(True, "--dry-run/--apply")):
+    """Delete stored outputs that no snapshot references any more (run after prune)."""
+    from ..services import backup
+
+    r = backup.gc_objects(grace_hours, dry_run)
+    typer.echo(f"{r['referenced']} referenced object(s), {r['orphans']} orphan(s)"
+               + (f", {r['deleted']} deleted" if not dry_run else " (dry run, use --apply to delete)"))
+
+
+@app.command()
+def backup(out: Path = typer.Argument(None, help="Archive path (default assurance-backup-<time>.tar)"),
+           objects: bool = typer.Option(True, "--objects/--no-objects", help="Include stored raw outputs"),
+           pg_bin: str = typer.Option(None, help="Directory holding pg_dump, if not on PATH")):
+    """Back up the database and every referenced stored output into one archive.
+
+    The master key is NOT in the backup. Back it up separately, or restored credentials are unreadable."""
+    from datetime import UTC, datetime
+
+    from ..services.backup import BackupError, create
+
+    out = out or Path(f"assurance-backup-{datetime.now(UTC):%Y%m%dT%H%M%SZ}.tar")
+    try:
+        m = create(out, objects, pg_bin)
+    except BackupError as e:
+        typer.echo(f"backup failed: {e}", err=True)
+        raise typer.Exit(1) from e
+    typer.echo(f"wrote {m['path']} ({m['bytes'] / 1e6:.1f} MB): database at {m['alembic_revision'] or 'unversioned'}, "
+               f"{m['objects']} object(s)")
+    if m["missing_objects"]:
+        typer.echo(f"warning: {len(m['missing_objects'])} referenced object(s) were missing from the store", err=True)
+
+
+@app.command("backup-loop")
+def backup_loop(directory: Path = typer.Argument(..., help="Where archives go"),
+                every_hours: float = typer.Option(24, help="Hours between backups"),
+                keep_days: int = typer.Option(14, help="Remove this tool's archives older than this")):
+    """Back up on a timer (the Compose "backup" service). Only files named assurance-backup-*.tar in the
+    directory are ever removed, and only after a new backup succeeded."""
+    import time
+    from datetime import UTC, datetime
+
+    from ..services.backup import BackupError, create
+
+    directory.mkdir(parents=True, exist_ok=True)
+    while True:  # pragma: no cover - long running
+        out = directory / f"assurance-backup-{datetime.now(UTC):%Y%m%dT%H%M%SZ}.tar"
+        try:
+            m = create(out, True, None)
+            typer.echo(f"wrote {m['path']} ({m['bytes'] / 1e6:.1f} MB)")
+            cutoff = time.time() - keep_days * 86400
+            for old in directory.glob("assurance-backup-*.tar"):
+                if old != out and old.stat().st_mtime < cutoff:
+                    old.unlink()
+                    typer.echo(f"removed {old}")
+        except BackupError as e:
+            typer.echo(f"backup failed: {e}", err=True)
+        time.sleep(every_hours * 3600)
+
+
+@app.command()
+def restore(archive: Path = typer.Argument(..., exists=True, dir_okay=False),
+            objects: bool = typer.Option(True, "--objects/--no-objects"),
+            yes: bool = typer.Option(False, "--yes", help="Do not ask for confirmation"),
+            pg_bin: str = typer.Option(None, help="Directory holding pg_restore, if not on PATH")):
+    """Replace the database with a backup, put back missing stored outputs, then migrate to this version.
+
+    Stop the API, workers and scheduler first."""
+    from alembic import command
+
+    from ..services.backup import BackupError, inspect
+    from ..services.backup import restore as do_restore
+
+    try:
+        m = inspect(archive)
+    except BackupError as e:
+        typer.echo(f"restore refused: {e}", err=True)
+        raise typer.Exit(1) from e
+    typer.echo(f"backup from {m['created_at']} (Assurance {m['app_version']}, {m['objects']} objects)")
+    if not yes and not typer.confirm("This REPLACES every table in the configured database. Continue?"):
+        raise typer.Exit(1)
+    try:
+        r = do_restore(archive, objects, pg_bin)
+    except BackupError as e:
+        typer.echo(f"restore failed: {e}", err=True)
+        raise typer.Exit(1) from e
+    typer.echo(f"database restored, {r['objects_restored']} object(s) put back")
+    if r.get("alembic_revision"):
+        command.upgrade(_alembic_cfg(), "head")
+        typer.echo("migrated to head")
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.WARNING)
+    app()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
