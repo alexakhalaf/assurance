@@ -62,3 +62,22 @@ jobs:
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           exit-code: "0"
+
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+      - name: Lint and render
+        run: |
+          C=deploy/helm/assurance
+          REQ="secrets.databaseUrl=x,secrets.redisUrl=x,secrets.s3AccessKey=x,secrets.s3SecretKey=x,secrets.masterKey=x"
+          helm lint "$C" --strict --set "$REQ"
+          helm template ci "$C" --set "$REQ" > default.yaml
+          helm template ci "$C" --set existingSecret=s,backup.enabled=true,ingress.enabled=true,api.autoscaling.enabled=true,worker.autoscaling.enabled=true > full.yaml
+      - name: Validate against Kubernetes schemas
+        run: |
+          go install github.com/yannh/kubeconform/cmd/kubeconform@v0.6.7
+          ~/go/bin/kubeconform -strict -summary -kubernetes-version 1.30.0 -skip ServiceMonitor default.yaml full.yaml

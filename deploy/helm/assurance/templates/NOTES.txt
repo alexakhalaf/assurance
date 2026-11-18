@@ -1,0 +1,12 @@
+Assurance {{ .Chart.AppVersion }} is deployed as release {{ .Release.Name }}.
+
+  API and UI: {{ if .Values.ingress.enabled }}https://{{ .Values.ingress.host }}{{ else }}kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "assurance.fullname" . }} 8000:{{ .Values.api.service.port }}{{ end }}
+  Workers: {{ .Values.worker.replicas }}   Scheduler replicas: {{ .Values.scheduler.replicas }} (one active)
+
+The master key is in Secret {{ include "assurance.secretName" . }} (key master-key). Back it up outside
+the cluster: database backups are useless for device credentials without it.
+{{- if not .Values.backup.enabled }}
+
+Nightly backups are off. Enable with --set backup.enabled=true, or run
+  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "assurance.fullname" . }}-api -- assurance-admin backup /tmp/b.tar
+{{- end }}

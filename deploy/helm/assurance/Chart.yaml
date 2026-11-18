@@ -1,0 +1,7 @@
+apiVersion: v2
+name: assurance
+description: Network snapshot and change assurance for Cisco IOS-XE and NX-OS (API, UI, workers, scheduler)
+type: application
+version: 0.5.0
+appVersion: "0.5.0"
+keywords: [network, assurance, cisco, snapshot]

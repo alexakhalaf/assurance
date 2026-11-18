@@ -74,7 +74,7 @@ class S3Store:
 
         self.bucket = bucket
         self.client = boto3.client(
-            "s3", endpoint_url=endpoint_url, aws_access_key_id=access_key,
+            "s3", endpoint_url=endpoint_url or None, aws_access_key_id=access_key,
             aws_secret_access_key=secret_key, region_name=region,
             config=Config(retries={"max_attempts": 5, "mode": "standard"}, signature_version="s3v4"),
         )

@@ -77,6 +77,30 @@ and an ESXi host swap on Eth1/3.
 
 ![Compare two snapshots](docs/screenshots/compare.png)
 
+## Kubernetes (Helm, high availability)
+
+`deploy/helm/assurance` runs the API (2+ replicas behind a Service/Ingress), collection workers
+(scale them with the fleet), and two schedulers (a Redis lock keeps one active). Migrations run as a
+pre-install/pre-upgrade hook, rolling updates keep the API serving, and PodDisruptionBudgets plus
+node/zone spreading keep each part up through node drains. Pods run non-root with a read-only root
+filesystem, no service account token and a NetworkPolicy. PostgreSQL, Redis and S3 are external:
+use HA services (managed PostgreSQL or CloudNativePG, Redis with replication, any S3).
+
+```bash
+assurance-admin gen-master-key --out master.key
+kubectl create secret generic assurance \
+  --from-literal=database-url='postgresql+psycopg://assurance:…@pg-rw:5432/assurance?sslmode=require' \
+  --from-literal=redis-url='redis://:…@redis:6379/0' \
+  --from-literal=s3-access-key=… --from-literal=s3-secret-key=… \
+  --from-file=master-key=master.key --from-literal=bootstrap-admin-password=…
+helm install assurance deploy/helm/assurance --set existingSecret=assurance \
+  --set ingress.enabled=true,ingress.host=assurance.example.net,ingress.tls.secretName=assurance-tls \
+  --set backup.enabled=true
+```
+
+Optional: `worker.autoscaling`/`api.autoscaling` (HPA), `serviceMonitor.enabled` (Prometheus
+Operator), `networkPolicy.egressCIDRs` to limit egress, `config.OTEL_ENDPOINT` for tracing.
+
 ## CLI
 
 The `assurance` command is a client of the API, so it runs anywhere that can reach the server.
@@ -279,8 +303,8 @@ From the architecture doc's release plan:
 - **0.5 beta (this release):** BGP, OSPF, MAC, VLANs, VRFs, port-channels, STP, HSRP/VRRP, NTP,
   hardware, configs, intent checks, topology, pre/post verification, reports, SSH host key pinning.
   Check profiles name the checks a type of change must pass (picked by change label prefix).
-- **1.0 GA:** OIDC SSO, rate limiting and hardening, backup/restore, OpenTelemetry tracing (done);
-  HA deployment (Helm), load test, pen test.
+- **1.0 GA:** OIDC SSO, rate limiting and hardening, backup/restore, OpenTelemetry tracing, Helm HA
+  deployment (done); load test, pen test.
 
 Known gaps: the live collector has not been run against real devices yet (mock data only); IOS-XE
 collects the global routing table only (no per-VRF commands yet); no IPv6; no reachability check
