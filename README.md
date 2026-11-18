@@ -190,6 +190,22 @@ All settings are environment variables (or `.env`), prefixed `ASSURANCE_`.
 | `OIDC_DISPLAY_NAME` | `Single sign-on` | Button text on the login page |
 | `LOCAL_LOGIN` | `true` | `false` leaves SSO as the only way to sign in (API tokens still work) |
 
+## Backup and restore
+
+```bash
+assurance-admin backup /backups/assurance-$(date +%F).tar     # pg_dump + every referenced stored output
+assurance-admin restore /backups/assurance-2026-11-18.tar      # stop API, workers and scheduler first
+assurance-admin prune --keep-days 90 --apply                   # retention (labelled snapshots are kept)
+assurance-admin gc-objects --apply                             # then delete outputs nothing references
+```
+
+A backup is one tar file (mode 0600): a `pg_dump` custom-format dump, the stored outputs, and a
+manifest with the schema revision and a checksum. Restore checks both, replaces the database, puts
+back any object missing from the store, then migrates to the running version, so a backup from an
+older release restores into a newer one. Use `--no-objects` when the bucket has its own replication.
+The **master key is not in the backup**; keep it with your secrets, or restored device credentials
+cannot be decrypted. With Compose: `docker compose run --rm -v $PWD:/backups api assurance-admin backup /backups/a.tar`.
+
 ## Development
 
 ```bash
@@ -251,7 +267,8 @@ From the architecture doc's release plan:
 - **0.5 beta (this release):** BGP, OSPF, MAC, VLANs, VRFs, port-channels, STP, HSRP/VRRP, NTP,
   hardware, configs, intent checks, topology, pre/post verification, reports, SSH host key pinning.
   Check profiles name the checks a type of change must pass (picked by change label prefix).
-- **1.0 GA:** HA deployment (Helm), OIDC SSO, backup/restore, OpenTelemetry tracing, hardening and pen test.
+- **1.0 GA:** OIDC SSO, rate limiting and hardening, backup/restore (done); HA deployment (Helm),
+  OpenTelemetry tracing, pen test.
 
 Known gaps: the live collector has not been run against real devices yet (mock data only); IOS-XE
 collects the global routing table only (no per-VRF commands yet); no IPv6; no reachability check

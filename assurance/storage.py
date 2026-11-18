@@ -8,6 +8,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import logging
+from collections.abc import Iterator
 from functools import lru_cache
 from pathlib import Path
 from typing import Protocol
@@ -22,6 +23,8 @@ class ObjectStore(Protocol):
     def get(self, key: str) -> bytes: ...
     def exists(self, key: str) -> bool: ...
     def ping(self) -> None: ...
+    def delete(self, key: str) -> None: ...
+    def keys(self, prefix: str) -> Iterator[tuple[str, float]]: ...  # (key, last modified epoch)
 
 
 class FilesystemStore:
@@ -51,6 +54,16 @@ class FilesystemStore:
     def ping(self) -> None:
         if not self.root.is_dir():
             raise RuntimeError(f"object store path {self.root} missing")
+
+    def delete(self, key: str) -> None:
+        self._path(key).unlink(missing_ok=True)
+
+    def keys(self, prefix: str) -> Iterator[tuple[str, float]]:
+        base = self.root / prefix
+        if base.is_dir():
+            for p in sorted(base.rglob("*")):
+                if p.is_file() and not p.name.endswith(".tmp"):
+                    yield p.relative_to(self.root).as_posix(), p.stat().st_mtime
 
 
 class S3Store:
@@ -98,6 +111,15 @@ class S3Store:
     def ping(self) -> None:
         self._ensure_bucket()
 
+    def delete(self, key: str) -> None:
+        self.client.delete_object(Bucket=self.bucket, Key=key)
+
+    def keys(self, prefix: str) -> Iterator[tuple[str, float]]:
+        self._ensure_bucket()
+        for page in self.client.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=prefix + "/"):
+            for o in page.get("Contents", []):
+                yield o["Key"], o["LastModified"].timestamp()
+
 
 @lru_cache
 def get_store() -> ObjectStore:
@@ -116,6 +138,9 @@ def put_text(text: str, namespace: str = "raw") -> tuple[str, str, int]:
     if not store.exists(key):
         store.put(key, gzip.compress(data, mtime=0))
     return key, digest, len(data)
+
+
+NAMESPACES = ("raw", "genie")
 
 
 def get_text(key: str) -> str:

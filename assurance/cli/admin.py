@@ -147,8 +147,73 @@ def prune(keep_days: int = typer.Option(30, help="Delete unlabelled snapshots ol
             for s in old:
                 db.delete(s)
             typer.echo("deleted")
-    # Raw objects are content-addressed and shared; orphaned objects are left for a bucket
-    # lifecycle rule in 0.1.
+    # Raw objects are content-addressed and shared between snapshots: `gc-objects` removes orphans.
+
+
+@app.command("gc-objects")
+def gc_objects(grace_hours: float = typer.Option(24, help="Keep orphans newer than this"),
+               dry_run: bool = typer.Option(True, "--dry-run/--apply")):
+    """Delete stored outputs that no snapshot references any more (run after prune)."""
+    from ..services import backup
+
+    r = backup.gc_objects(grace_hours, dry_run)
+    typer.echo(f"{r['referenced']} referenced object(s), {r['orphans']} orphan(s)"
+               + (f", {r['deleted']} deleted" if not dry_run else " (dry run, use --apply to delete)"))
+
+
+@app.command()
+def backup(out: Path = typer.Argument(None, help="Archive path (default assurance-backup-<time>.tar)"),
+           objects: bool = typer.Option(True, "--objects/--no-objects", help="Include stored raw outputs"),
+           pg_bin: str = typer.Option(None, help="Directory holding pg_dump, if not on PATH")):
+    """Back up the database and every referenced stored output into one archive.
+
+    The master key is NOT in the backup. Back it up separately, or restored credentials are unreadable."""
+    from datetime import UTC, datetime
+
+    from ..services.backup import BackupError, create
+
+    out = out or Path(f"assurance-backup-{datetime.now(UTC):%Y%m%dT%H%M%SZ}.tar")
+    try:
+        m = create(out, objects, pg_bin)
+    except BackupError as e:
+        typer.echo(f"backup failed: {e}", err=True)
+        raise typer.Exit(1) from e
+    typer.echo(f"wrote {m['path']} ({m['bytes'] / 1e6:.1f} MB): database at {m['alembic_revision'] or 'unversioned'}, "
+               f"{m['objects']} object(s)")
+    if m["missing_objects"]:
+        typer.echo(f"warning: {len(m['missing_objects'])} referenced object(s) were missing from the store", err=True)
+
+
+@app.command()
+def restore(archive: Path = typer.Argument(..., exists=True, dir_okay=False),
+            objects: bool = typer.Option(True, "--objects/--no-objects"),
+            yes: bool = typer.Option(False, "--yes", help="Do not ask for confirmation"),
+            pg_bin: str = typer.Option(None, help="Directory holding pg_restore, if not on PATH")):
+    """Replace the database with a backup, put back missing stored outputs, then migrate to this version.
+
+    Stop the API, workers and scheduler first."""
+    from alembic import command
+
+    from ..services.backup import BackupError, inspect
+    from ..services.backup import restore as do_restore
+
+    try:
+        m = inspect(archive)
+    except BackupError as e:
+        typer.echo(f"restore refused: {e}", err=True)
+        raise typer.Exit(1) from e
+    typer.echo(f"backup from {m['created_at']} (Assurance {m['app_version']}, {m['objects']} objects)")
+    if not yes and not typer.confirm("This REPLACES every table in the configured database. Continue?"):
+        raise typer.Exit(1)
+    try:
+        r = do_restore(archive, objects, pg_bin)
+    except BackupError as e:
+        typer.echo(f"restore failed: {e}", err=True)
+        raise typer.Exit(1) from e
+    typer.echo(f"database restored, {r['objects_restored']} object(s) put back")
+    if r.get("alembic_revision"):
+        command.upgrade(_alembic_cfg(), "head")
+        typer.echo("migrated to head")
 
 
 def main() -> None:
