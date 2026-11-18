@@ -40,6 +40,8 @@ def _schema(tmp_path_factory):
     Base.metadata.drop_all(engine)
     with engine.begin() as c:
         c.execute(text("DROP TABLE IF EXISTS alembic_version"))
+    with engine.begin() as c:
+        c.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
     Base.metadata.create_all(engine)
     yield
     Base.metadata.drop_all(engine)

@@ -263,7 +263,7 @@ def test_webhook_is_signed(client, inventory, oper_h, monkeypatch):
 
     sent = {}
 
-    def fake_post(url, content, headers, timeout):
+    def fake_post(url, content, headers, timeout, **_):
         sent.update(url=url, body=content, headers=headers)
         return httpx.Response(204)
 

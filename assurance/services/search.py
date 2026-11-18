@@ -11,7 +11,8 @@ from __future__ import annotations
 import ipaddress
 import re
 
-from sqlalchemy import String, cast, select
+from sqlalchemy import Text, case, cast, func, or_, select
+from sqlalchemy.dialects.postgresql import INET
 from sqlalchemy.orm import Session
 
 from ..collection.normalize import normalize_mac
@@ -66,9 +67,11 @@ def _like(q: str) -> str:
     return "%" + q.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_") + "%"
 
 
-def _candidates(db: Session, snapshot_ids: list[str], kind: str, q: str, tables=None, limit=20000):
+def _candidates(db: Session, snapshot_ids: list[str], kind: str, q: str, tables=None, limit=2000):
+    """Rows whose JSON contains the text (trigram-indexed ILIKE), with a hard cap so a value present in
+    every route of every device can't load the whole snapshot into memory."""
     stmt = select(StateRow.snapshot_id, StateRow.device_name, StateRow.table_name, StateRow.key, StateRow.data) \
-        .where(StateRow.snapshot_id.in_(snapshot_ids), cast(StateRow.data, String).ilike(_like(q)))
+        .where(StateRow.snapshot_id.in_(snapshot_ids), cast(StateRow.data, Text).ilike(_like(q)))
     if tables:
         stmt = stmt.where(StateRow.table_name.in_(tables))
     return db.execute(stmt.limit(limit))
@@ -83,53 +86,55 @@ def _hits(rows, kind: str, q: str):
             yield sid, {"device": dev, "table": table, "key": key, "fields": fields, "row": data}
 
 
+_V4_PREFIX = r"^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$"
+MAX_ROUTES = 2000
+
+
+def _route_inet():
+    """The route's prefix as inet, or NULL when it isn't an IPv4 prefix (CASE guards the cast)."""
+    prefix = StateRow.data["prefix"].as_string()
+    return case((prefix.op("~")(_V4_PREFIX), cast(prefix, INET)), else_=None)
+
+
 def _covering_routes(db: Session, snapshot_id: str, ip: str) -> list[dict]:
-    """Longest-prefix match per device and VRF."""
-    addr = ipaddress.IPv4Address(ip)
-    best: dict[tuple, tuple[int, dict]] = {}
-    rows = db.execute(select(StateRow.device_name, StateRow.data).where(
-        StateRow.snapshot_id == snapshot_id, StateRow.table_name == "routes"))
-    for dev, r in rows:
-        try:
-            net = ipaddress.IPv4Network(r.get("prefix"), strict=False)
-        except (ValueError, TypeError):
-            continue
-        if addr in net:
-            k = (dev, r.get("vrf"))
-            if k not in best or net.prefixlen > best[k][0]:
-                best[k] = (net.prefixlen, r)
-    return [{"device": d, "vrf": v, **{k: r[k] for k in ("prefix", "protocol", "next_hops") if k in r}}
-            for (d, v), (_, r) in sorted(best.items(), key=lambda x: (x[0][0], x[0][1] or ""))]
+    """Longest-prefix match per device and VRF, computed in PostgreSQL (inet >>=, DISTINCT ON)."""
+    net, vrf = _route_inet(), StateRow.data["vrf"].as_string()
+    stmt = (select(StateRow.device_name, StateRow.data)
+            .where(StateRow.snapshot_id == snapshot_id, StateRow.table_name == "routes",
+                   net.op(">>=")(cast(ip, INET)))
+            .distinct(StateRow.device_name, vrf)
+            .order_by(StateRow.device_name, vrf, func.masklen(net).desc())
+            .limit(MAX_ROUTES))
+    return [{"device": d, "vrf": r.get("vrf"), **{k: r[k] for k in ("prefix", "protocol", "next_hops") if k in r}}
+            for d, r in db.execute(stmt)]
 
 
 def _related_routes(db: Session, snapshot_id: str, prefix: str) -> list[dict]:
     """Routes equal to, inside, or covering a prefix."""
-    target = ipaddress.IPv4Network(prefix)
-    out = []
-    rows = db.execute(select(StateRow.device_name, StateRow.data).where(
-        StateRow.snapshot_id == snapshot_id, StateRow.table_name == "routes"))
-    for dev, r in rows:
-        try:
-            net = ipaddress.IPv4Network(r.get("prefix"), strict=False)
-        except (ValueError, TypeError):
-            continue
-        rel = "exact" if net == target else "subnet" if net.subnet_of(target) else \
-            "covering" if target.subnet_of(net) else None
-        if rel:
-            out.append({"device": dev, "vrf": r.get("vrf"), "prefix": r.get("prefix"), "relation": rel,
-                        "protocol": r.get("protocol"), "next_hops": r.get("next_hops")})
-    return sorted(out, key=lambda x: (x["device"], x["vrf"] or "", x["prefix"]))
+    net, target = _route_inet(), cast(prefix, INET)
+    rel = case((func.network(net) == target, "exact"), (net.op("<<")(target), "subnet"), else_="covering")
+    stmt = (select(StateRow.device_name, StateRow.data, rel)
+            .where(StateRow.snapshot_id == snapshot_id, StateRow.table_name == "routes",
+                   or_(func.network(net) == target, net.op("<<")(target), net.op(">>")(target)))
+            .order_by(StateRow.device_name, StateRow.data["vrf"].as_string(), StateRow.data["prefix"].as_string())
+            .limit(MAX_ROUTES))
+    return [{"device": dev, "vrf": r.get("vrf"), "prefix": r.get("prefix"), "relation": relation,
+             "protocol": r.get("protocol"), "next_hops": r.get("next_hops")}
+            for dev, r, relation in db.execute(stmt)]
 
 
 def search(db: Session, snap: Snapshot, q: str, tables: list[str] | None = None) -> dict:
     kind, nq = classify(q)
-    hits = [h for _, h in _hits(_candidates(db, [snap.id], kind, nq, tables), kind, nq)]
+    rows = list(_candidates(db, [snap.id], kind, nq, tables))
+    capped = len(rows) >= 2000  # more candidates exist than were examined
+    hits = [h for _, h in _hits(rows, kind, nq)]
     hits.sort(key=lambda h: (h["table"], h["device"], h["key"]))
     by_table: dict[str, int] = {}
     for h in hits:
         by_table[h["table"]] = by_table.get(h["table"], 0) + 1
     out = {"query": q, "kind": kind, "normalized": nq, "snapshot": {"id": snap.id, "created_at": snap.created_at},
-           "total": len(hits), "by_table": by_table, "hits": hits[:MAX_HITS], "truncated": len(hits) > MAX_HITS}
+           "total": len(hits), "by_table": by_table, "hits": hits[:MAX_HITS],
+           "truncated": len(hits) > MAX_HITS or capped}
     if kind == "ip":
         out["routes"] = _covering_routes(db, snap.id, nq)
     elif kind == "prefix":
@@ -142,7 +147,7 @@ def history(db: Session, q: str, snapshots: list[Snapshot], tables: list[str] | 
     kind, nq = classify(q)
     per: dict[str, dict] = {s.id: {"id": s.id, "created_at": s.created_at, "labels": s.labels, "hits": []}
                             for s in snapshots}
-    for sid, h in _hits(_candidates(db, list(per), kind, nq, tables, limit=100000), kind, nq):
+    for sid, h in _hits(_candidates(db, list(per), kind, nq, tables, limit=20000), kind, nq):
         per[sid]["hits"].append({k: h[k] for k in ("device", "table", "key", "fields")})
     timeline = []
     prev = None

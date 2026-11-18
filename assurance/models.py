@@ -22,6 +22,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -245,6 +246,8 @@ class StateRow(Base):
     __table_args__ = (
         Index("ix_state_snap_table_dev", "snapshot_id", "table_name", "device_name"),
         Index("ix_state_dev_table", "device_name", "table_name"),
+        # Text search (ILIKE over the row JSON); needs the pg_trgm extension, created by migration 0008.
+        Index("ix_state_data_trgm", text("(data::text) gin_trgm_ops"), postgresql_using="gin"),
     )
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
     snapshot_id: Mapped[str] = mapped_column(ForeignKey("snapshots.id", ondelete="CASCADE"))

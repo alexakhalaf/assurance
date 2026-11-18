@@ -18,7 +18,7 @@ from ...db import get_db
 from ...exports import safe_cell
 from ...models import DeviceCollection, RawOutput, Snapshot, SnapshotStatus, StateRow
 from ...services import audit
-from ...services.diff import DIFFABLE, TABLES, SnapshotNotFound, diff_snapshots, render_text, resolve_ref
+from ...services.diff import DIFFABLE, TABLES, SnapshotNotFound, diff_snapshots, diff_summary, render_text, resolve_ref
 from ...services.diff import cache_clear as diff_cache_clear
 from ...services.snapshots import EmptyScope, WebhookTargetError, create_snapshot
 from ...storage import get_text
@@ -164,7 +164,7 @@ def get_table(
         pat = _like(q.lower())
         where.append(or_(func.lower(StateRow.device_name).like(pat, escape="\\"),
                          func.lower(StateRow.key).like(pat, escape="\\"),
-                         func.lower(cast(StateRow.data, Text)).like(pat, escape="\\")))
+                         cast(StateRow.data, Text).ilike(pat, escape="\\")))  # ix_state_data_trgm
     if sort in (None, "device"):
         keys = [StateRow.device_name, StateRow.key]
     elif sort == "key":
@@ -320,8 +320,8 @@ def overview(_: Principal = Depends(viewer), db: Session = Depends(get_db),
         since = latest.created_at
         prev_day = [s for s in recent if s.status in DIFFABLE and (since - s.created_at).total_seconds() <= 86400]
         if len(prev_day) >= 2:
-            d = diff_snapshots(db, prev_day[-1], prev_day[0])
-            top = {k: sum(v.values()) for k, v in d["summary"]["by_device"].items()}
+            summ = diff_summary(db, prev_day[-1], prev_day[0])
+            top = {k: sum(v.values()) for k, v in summ["by_device"].items()}
     collected_failed = sorted(d.name for d in devices if d.last_collection_status == "failed")
     return {
         "devices": {"total": len(devices), "by_status": by("status"), "by_platform": by("platform"),

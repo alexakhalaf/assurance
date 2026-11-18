@@ -180,6 +180,23 @@ def diff_snapshots(db: Session, a: Snapshot, b: Snapshot, tables: list[str] | No
     return result
 
 
+def diff_summary(db: Session, a: Snapshot, b: Snapshot, tables: list[str] | None = None,
+                 devices: list[str] | None = None) -> dict:
+    """The diff's summary (counts by table and device) without loading any row data: what finalize,
+    the dashboard and change verification need."""
+    tables = [t for t in (tables or TABLES) if t in TABLES]
+    a_ok, a_failed = _collected(db, a.id)
+    b_ok, b_failed = _collected(db, b.id)
+    a_all, b_all = a_ok | a_failed, b_ok | b_failed
+    if devices:
+        want = set(devices)
+        a_ok, b_ok, a_all, b_all = a_ok & want, b_ok & want, a_all & want, b_all & want
+    both = sorted(a_ok & b_ok)
+    changes = [{"device": dev, "table": t, "change": "added" if ia is None else "removed" if ib is None else "changed"}
+               for dev, t, _k, ia, ib in _changed_keys(db, a.id, b.id, tables, both)]
+    return summarize(changes, sorted((a_all & b_all) - set(both)), sorted(b_all - a_all), sorted(a_all - b_all))
+
+
 def _snap_ref(s: Snapshot) -> dict:
     return {"id": s.id, "created_at": s.created_at.isoformat() if s.created_at else None,
             "status": s.status, "labels": s.labels}

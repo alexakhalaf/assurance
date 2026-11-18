@@ -18,7 +18,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from ..models import CheckResult, CheckRule, DeviceCollection, Snapshot, StateRow
@@ -31,17 +31,17 @@ SEVERITIES = (FAIL, WARNING)
 
 
 class SnapshotData:
-    """In-memory view of one snapshot: tables[table][device][key] = row, plus device metadata."""
+    """View of one snapshot for the rules: tables[table][device][key] = row, plus device metadata.
+
+    Tables are loaded on first use, so a rule set that never reads routes or config never pulls them
+    into memory (those two are most of a snapshot's rows). Route counts per VRF come from SQL.
+    """
 
     def __init__(self, db: Session, snap: Snapshot, tables: list[str] | None = None):
         self.snapshot = snap
-        self.tables: dict[str, dict[str, dict[str, dict]]] = defaultdict(lambda: defaultdict(dict))
-        q = select(StateRow.table_name, StateRow.device_name, StateRow.key, StateRow.data).where(
-            StateRow.snapshot_id == snap.id)
-        if tables:
-            q = q.where(StateRow.table_name.in_(tables))
-        for t, d, k, data in db.execute(q):
-            self.tables[t][d][k] = data
+        self._db = db
+        self._allowed = set(tables) if tables else None
+        self.tables: dict[str, dict[str, dict[str, dict]]] = {}
         self.devices: dict[str, dict] = {}
         self.collected: set[str] = set()
         for name, meta, status in db.execute(select(
@@ -50,14 +50,39 @@ class SnapshotData:
             self.devices[name] = {**(meta or {}), "status": status}
             if status in ("ok", "partial"):
                 self.collected.add(name)
+        self._route_counts: dict[str, dict[str, int]] | None = None
+
+    def _load(self, table: str) -> dict[str, dict[str, dict]]:
+        if table not in self.tables:
+            data: dict[str, dict[str, dict]] = defaultdict(dict)
+            if self._allowed is None or table in self._allowed:
+                q = select(StateRow.device_name, StateRow.key, StateRow.data).where(
+                    StateRow.snapshot_id == self.snapshot.id, StateRow.table_name == table)
+                for d, k, row in self._db.execute(q.execution_options(yield_per=5000)):
+                    data[d][k] = row
+            self.tables[table] = data
+        return self.tables[table]
 
     def rows(self, table: str):
+        t = self._load(table)
         for device in sorted(self.collected):
-            for key, row in sorted(self.tables[table].get(device, {}).items()):
+            for key, row in sorted(t.get(device, {}).items()):
                 yield device, key, row
 
     def table(self, table: str, device: str) -> dict[str, dict]:
-        return self.tables[table].get(device, {})
+        return self._load(table).get(device, {})
+
+    def route_counts(self, device: str) -> dict[str, int]:
+        """Routes per VRF, counted in the database."""
+        if self._route_counts is None:
+            self._route_counts = defaultdict(dict)
+            vrf = StateRow.data["vrf"].as_string()
+            for d, v, n in self._db.execute(
+                    select(StateRow.device_name, vrf, func.count())
+                    .where(StateRow.snapshot_id == self.snapshot.id, StateRow.table_name == "routes")
+                    .group_by(StateRow.device_name, vrf)):
+                self._route_counts[d][v] = n
+        return self._route_counts.get(device, {})
 
 
 @dataclass
@@ -281,14 +306,8 @@ def _portchannel_member_lost(s: SnapshotData, prev: SnapshotData, **_):
 
 
 def _route_count_drop(s: SnapshotData, prev: SnapshotData, threshold_pct: float = 2.0, **_):
-    def counts(sd: SnapshotData, d: str):
-        c: dict[str, int] = defaultdict(int)
-        for r in sd.table("routes", d).values():
-            c[r["vrf"]] += 1
-        return c
-
     for d in sorted(prev.collected & s.collected):
-        before, after = counts(prev, d), counts(s, d)
+        before, after = prev.route_counts(d), s.route_counts(d)
         for vrf, n in before.items():
             m = after.get(vrf, 0)
             if n and (n - m) * 100.0 / n > threshold_pct:
@@ -571,7 +590,7 @@ def prepost(db: Session, pre: Snapshot, post: Snapshot, route_drop_pct: float | 
     With a profile, only its rules are evaluated, its route-drop threshold applies (unless one is
     given), and in strict mode warnings fail the verification as well.
     """
-    from .diff import diff_snapshots
+    from .diff import diff_summary
 
     wanted = set(profile.rules) if profile is not None and profile.rules else None
     if route_drop_pct is None:
@@ -594,7 +613,7 @@ def prepost(db: Session, pre: Snapshot, post: Snapshot, route_drop_pct: float | 
     checks = {**delta["rules"], **{f"new:{k}": {**v, "name": f"New: {v['name']}"} for k, v in new_failures.items()}}
     fails = sum(len(r["violations"]) for r in checks.values() if r["severity"] == FAIL)
     warns = sum(len(r["violations"]) for r in checks.values() if r["severity"] == WARNING)
-    d = diff_snapshots(db, pre, post)
+    d = {"summary": diff_summary(db, pre, post)}
     missing = sorted(s_pre.collected - s_post.collected)
     strict = bool(profile is not None and profile.strict)
     return {

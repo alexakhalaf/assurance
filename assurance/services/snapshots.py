@@ -38,7 +38,7 @@ from ..models import (
 from ..storage import put_text
 from . import audit
 from . import credentials as cred_svc
-from .diff import DIFFABLE, diff_snapshots, row_hash
+from .diff import DIFFABLE, diff_summary, row_hash
 from .inventory import resolve_scope
 
 log = logging.getLogger(__name__)
@@ -322,8 +322,7 @@ def _finalize(snapshot_id: str) -> None:
                 Snapshot.status.in_(DIFFABLE), Snapshot.created_at < snap.created_at, Snapshot.id != snap.id)
                 .order_by(Snapshot.created_at.desc()).limit(1))
             if prev is not None:
-                d = diff_snapshots(db, prev, snap)
-                s = d["summary"]
+                s = diff_summary(db, prev, snap)
                 summary["changes"] = {"previous": prev.id, "total": s["total"], "added": s["added"],
                                       "removed": s["removed"], "changed": s["changed"],
                                       "devices_changed": s["devices_changed"],
