@@ -242,6 +242,22 @@ older release restores into a newer one. Use `--no-objects` when the bucket has 
 The **master key is not in the backup**; keep it with your secrets, or restored device credentials
 cannot be decrypted. With Compose: `docker compose run --rm -v $PWD:/backups api assurance-admin backup /backups/a.tar`.
 
+## Load testing
+
+`tools/loadtest` measures a running deployment against a synthetic fleet built from the mock captures
+(each device gets its own name, serial, IP and `--routes` extra routes; scenario `t2` churns
+`--churn`% of them):
+
+```bash
+python tools/loadtest/synth.py --devices 1000 --routes 1000 --out /var/tmp/synth
+# run the API and N workers with ASSURANCE_COLLECTOR=mock, ASSURANCE_MOCK_ROOT=/var/tmp/synth
+python tools/loadtest/run.py --api http://127.0.0.1:8000 --token "$TOKEN" \
+  --inventory /var/tmp/synth/inventory.csv --workers 3 --out loadtest.md
+```
+
+It reports snapshot wall time, devices per minute, per-device p50/p95, and p50/p95/max latency for
+the dashboard, diff, search, topology, reports and pre/post endpoints under concurrent clients.
+
 ## Development
 
 ```bash
