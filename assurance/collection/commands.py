@@ -3,10 +3,11 @@
 Every command here has a Genie parser for that OS. Raw text is always kept, so
 outputs can be re-parsed later when Genie parsers improve.
 """
-from .models import IOS_XE, NX_OS
+from .target import IOS_XE, NX_OS
 
 COMMANDS = {
     IOS_XE: {
+        "version": "show version",
         "interfaces": "show interfaces",
         "routes": "show ip route",
         "arp": "show ip arp",
@@ -14,6 +15,7 @@ COMMANDS = {
         "lldp": "show lldp neighbors detail",
     },
     NX_OS: {
+        "version": "show version",
         "interfaces": "show interface",
         "routes": "show ip route vrf all",
         "arp": "show ip arp vrf all",

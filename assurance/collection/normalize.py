@@ -3,6 +3,7 @@
 Genie schemas differ a bit per OS and include volatile fields (counters, ages,
 timers). Normalizing keeps only state we care about, so diffs show real change.
 
+  facts:      {"device": {hostname, os, os_version, model, serial, image}}
   interfaces: {name: {admin_status, oper_status, description, ipv4, mtu, bandwidth_kbps, speed, duplex, mac}}
   routes:     {"<vrf>|<prefix>": {vrf, prefix, protocol, distance, metric, next_hops: [{via, interface}]}}
   arp:        {"<vrf>|<ip>": {vrf, ip, mac, interface}}
@@ -44,6 +45,37 @@ def normalize_mac(mac):
 def _short_host(device_id: str) -> str:
     """'yyc-dc-nxs01(FDO123)' or 'rtr02.corp.example' -> bare hostname."""
     return re.sub(r"\([^)]*\)$", "", (device_id or "unknown").strip()).split(".")[0]
+
+
+# --------------------------------------------------------------------- facts
+
+def facts(g: dict) -> dict:
+    """Device facts from 'show version'. Uptime is left out on purpose (volatile)."""
+    g = g or {}
+    if "version" in g:  # IOS-XE
+        v = g["version"]
+        row = {
+            "hostname": v.get("hostname"),
+            "os": v.get("os") or "IOS-XE",
+            "os_version": v.get("version") or v.get("xe_version"),
+            "model": v.get("chassis") or v.get("rtr_type"),
+            "serial": v.get("chassis_sn"),
+            "image": v.get("system_image"),
+        }
+    elif "platform" in g:  # NX-OS
+        p = g["platform"]
+        hw, sw = p.get("hardware", {}), p.get("software", {})
+        row = {
+            "hostname": hw.get("device_name"),
+            "os": p.get("os") or "NX-OS",
+            "os_version": sw.get("system_version"),
+            "model": hw.get("model") or hw.get("chassis"),
+            "serial": hw.get("processor_board_id"),
+            "image": sw.get("system_image_file"),
+        }
+    else:
+        return {}
+    return {"device": row}
 
 
 # ---------------------------------------------------------------- interfaces
@@ -166,6 +198,7 @@ def normalize(genie: dict[str, dict]) -> dict:
     """genie is {table: genie_dict} using the keys from commands.COMMANDS."""
     r = routes(genie.get("routes"))
     return {
+        "facts": facts(genie.get("version")),
         "interfaces": interfaces(genie.get("interfaces")),
         "routes": r,
         "arp": arp(genie.get("arp"), interface_vrfs(r)),

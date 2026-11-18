@@ -5,13 +5,13 @@ import logging
 
 from . import genie_parse
 from .commands import COMMANDS
-from .models import Device
 from .normalize import normalize
+from .target import Target
 
 log = logging.getLogger(__name__)
 
 
-def parse_device(device: Device, raw: dict[str, str]) -> tuple[dict, dict, list[str]]:
+def parse_device(device: Target, raw: dict[str, str]) -> tuple[dict, dict, list[str]]:
     """Returns (genie_output, normalized, warnings). A failing command doesn't sink the device."""
     genie, warnings = {}, []
     for table, cmd in COMMANDS[device.platform].items():

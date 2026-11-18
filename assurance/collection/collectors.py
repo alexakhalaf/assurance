@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from .commands import COMMANDS, command_filename
-from .models import Device
+from .target import Credentials, Target
 
 log = logging.getLogger(__name__)
 
@@ -24,7 +24,7 @@ class MockCollector:
     def __init__(self, root: str | Path):
         self.root = Path(root)
 
-    def collect(self, device: Device) -> dict[str, str]:
+    def collect(self, device: Target) -> dict[str, str]:
         ddir = self.root / device.name
         if not ddir.is_dir():
             raise CollectionError(f"no mock data at {ddir}")
@@ -36,16 +36,16 @@ class MockCollector:
 
 
 class LiveCollector:
-    """Credentials come from the caller (env vars in the CLI), never the inventory file."""
+    """Connects with pyATS/Unicon. Credentials are resolved per device by the caller and only
+    ever held in memory."""
 
-    def __init__(self, username: str, password: str, enable_password: str | None = None,
-                 timeout: int = 60):
-        self.username = username
-        self.password = password
-        self.enable_password = enable_password
+    def __init__(self, credentials: Credentials, timeout: int = 60):
+        self.username = credentials.username
+        self.password = credentials.password
+        self.enable_password = credentials.enable_password
         self.timeout = timeout
 
-    def _testbed_device(self, device: Device):
+    def _testbed_device(self, device: Target):
         try:
             from genie.testbed import load
         except ImportError as e:  # pragma: no cover
@@ -62,7 +62,7 @@ class LiveCollector:
         }}})
         return tb.devices[device.name]
 
-    def collect(self, device: Device) -> dict[str, str]:
+    def collect(self, device: Target) -> dict[str, str]:
         dev = self._testbed_device(device)
         raw = {}
         try:
@@ -84,7 +84,7 @@ class LiveCollector:
         return raw
 
 
-def collect_many(collector, devices: list[Device], workers: int = 10):
+def collect_many(collector, devices: list[Target], workers: int = 10):
     """Returns ({device_name: raw}, {device_name: error_message})."""
     results, errors = {}, {}
     with ThreadPoolExecutor(max_workers=workers) as pool:

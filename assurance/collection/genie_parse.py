@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import logging
-from functools import lru_cache
+from functools import cache
 
 log = logging.getLogger(__name__)
 
 
-@lru_cache(maxsize=None)
+@cache
 def _device(os_name: str):
     from genie.conf.base import Device as GenieDevice
 
