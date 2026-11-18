@@ -13,3 +13,4 @@ PARSER_WARNINGS = Counter("assurance_parser_warnings_total", "Genie parser failu
 HTTP_REQUESTS = Counter("assurance_http_requests_total", "API requests", ["method", "route", "status"])
 HTTP_LATENCY = Histogram("assurance_http_request_seconds", "API latency", ["method", "route"])
 DEVICES = Gauge("assurance_devices", "Devices in inventory", ["status"])
+RATE_LIMITED = Counter("assurance_rate_limited_total", "Requests refused by a rate limit", ["kind"])

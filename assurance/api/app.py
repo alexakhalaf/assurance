@@ -16,7 +16,10 @@ from .. import __version__, metrics
 from ..config import get_settings
 from ..db import session_scope
 from ..logging_setup import configure_logging, request_id
+from ..security import ratelimit
+from ..security.passwords import hash_token
 from . import errors
+from .deps import client_ip
 from .routes import admin, analysis, auth, checks, discovery, inventory, reports_sched, search, snapshots
 
 log = logging.getLogger(__name__)
@@ -30,6 +33,9 @@ SECURITY_HEADERS = {
         "script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'"
     ),
 }
+
+# Where passwords or one-time codes can be guessed, or state is created without a session.
+LOGIN_PATHS = {"/api/v1/auth/login", "/api/v1/auth/oidc/login", "/api/v1/auth/oidc/exchange"}
 
 
 def create_app() -> FastAPI:
@@ -47,6 +53,34 @@ def create_app() -> FastAPI:
     if s.cors_origins:
         app.add_middleware(CORSMiddleware, allow_origins=s.cors_origins, allow_methods=["*"],
                            allow_headers=["Authorization", "Content-Type"])
+
+    @app.middleware("http")
+    async def guard(request: Request, call_next):
+        """Request size cap and rate limits, before any route work."""
+        path = request.url.path
+        if not path.startswith("/api/"):
+            return await call_next(request)
+        size = request.headers.get("content-length")
+        if size and size.isdigit() and int(size) > s.max_request_bytes:
+            return errors.problem(413, "Payload Too Large", f"Request body is over {s.max_request_bytes} bytes")
+        ip = client_ip(request) or "unknown"
+        if path in LOGIN_PATHS:
+            limit, key = s.rate_limit_login_per_minute, f"login:{ip}"
+        else:
+            auth = request.headers.get("authorization", "")
+            tok = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
+            limit, key = s.rate_limit_per_minute, f"tok:{hash_token(tok)[:24]}" if tok else f"ip:{ip}"
+        ok, remaining, reset = ratelimit.check(key, limit)
+        if not ok:
+            metrics.RATE_LIMITED.labels(key.split(":", 1)[0]).inc()
+            resp = errors.problem(429, "Too Many Requests", f"Rate limit of {limit} requests a minute exceeded")
+            resp.headers["Retry-After"] = str(reset)
+        else:
+            resp = await call_next(request)
+        if limit > 0 and remaining >= 0:
+            resp.headers["X-RateLimit-Limit"] = str(limit)
+            resp.headers["X-RateLimit-Remaining"] = str(remaining)
+        return resp
 
     @app.middleware("http")
     async def observe(request: Request, call_next):

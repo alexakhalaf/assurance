@@ -87,6 +87,21 @@ class User(Base):
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # local = password in this database; oidc = signs in through the identity provider only
+    auth_source: Mapped[str] = mapped_column(String(16), default="local", server_default="local")
+
+
+class OidcState(Base):
+    """Short-lived OIDC login state (kind=login: state, nonce, PKCE verifier) and the one-time
+    handoff code that turns a finished login into a session without putting a token in a URL."""
+
+    __tablename__ = "oidc_states"
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    nonce: Mapped[str | None] = mapped_column(String(128))
+    verifier: Mapped[str | None] = mapped_column(String(128))
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class ApiToken(Base):

@@ -47,6 +47,7 @@ class UserOut(ORM):
     is_active: bool
     created_at: datetime
     last_login_at: datetime | None
+    auth_source: str = "local"
 
 
 class UserIn(BaseModel):

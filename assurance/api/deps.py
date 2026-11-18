@@ -31,7 +31,9 @@ class Principal:
 
 
 def client_ip(request: Request) -> str | None:
-    return request.client.host if request.client else None
+    from ..security.ratelimit import client_ip as real_ip
+
+    return real_ip(request.client.host if request.client else None, request.headers.get("x-forwarded-for"))
 
 
 def current_principal(

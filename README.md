@@ -175,6 +175,20 @@ All settings are environment variables (or `.env`), prefixed `ASSURANCE_`.
 | `BOOTSTRAP_ADMIN_PASSWORD` | | Creates user `admin` on the first `migrate` when no user exists |
 | `WEBHOOK_SECRET` | | HMAC key for webhook signatures |
 | `LOG_LEVEL`, `LOG_JSON` | `INFO`, `true` | |
+| `RATE_LIMIT_PER_MINUTE` | `600` | Per API token, or per client IP without a token. `0` turns it off |
+| `RATE_LIMIT_LOGIN_PER_MINUTE` | `10` | Password login and SSO start/exchange, per client IP |
+| `MAX_REQUEST_BYTES` | `20971520` | Larger request bodies get 413 |
+| `TRUSTED_PROXIES` | `[]` | JSON list of proxy IPs/CIDRs whose `X-Forwarded-For` is believed, e.g. `["10.0.0.0/8"]` |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM` | | Mail server for scheduled reports |
+| `SMTP_USERNAME`, `SMTP_PASSWORD` | | Optional SMTP auth |
+| `SMTP_STARTTLS`, `SMTP_SSL` | `true`, `false` | STARTTLS on 587, or implicit TLS on 465 |
+| `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` | | Single sign-on is on when issuer and client id are set (Entra ID, Okta, Keycloak, …) |
+| `OIDC_REDIRECT_URI` | | `https://<host>/api/v1/auth/oidc/callback`, registered with the IdP |
+| `OIDC_ROLE_MAP` | `{}` | JSON map of IdP group to role, e.g. `{"netops":"operator","netops-admins":"admin"}`. Highest wins |
+| `OIDC_DEFAULT_ROLE` | `none` | Role for users with no mapped group; `none` refuses them |
+| `OIDC_GROUPS_CLAIM`, `OIDC_USERNAME_CLAIM` | `groups`, `preferred_username` | |
+| `OIDC_DISPLAY_NAME` | `Single sign-on` | Button text on the login page |
+| `LOCAL_LOGIN` | `true` | `false` leaves SSO as the only way to sign in (API tokens still work) |
 
 ## Development
 
@@ -223,6 +237,11 @@ Run the API locally with `uvicorn --factory assurance.api.app:create_app --reloa
   A changed key stops collection for that device until an admin resets the pin.
 - Secrets are masked in every collected output (not only the running config) before parsing or storage.
 - Use a dedicated read-only device account (TACACS+ command authorization or a low privilege level).
+- Single sign-on uses the authorization code flow with PKCE, a nonce and a signed state; the ID token
+  signature is checked against the IdP's JWKS. Roles follow IdP groups on every sign-in, and an SSO
+  login never takes over a local account of the same name.
+- Rate limits on login and on the API (shared through Redis across API replicas), a request size cap,
+  and `X-Forwarded-For` honored only from `TRUSTED_PROXIES`.
 - Put TLS in front of the API (reverse proxy or load balancer) in any shared environment.
 
 ## Roadmap
@@ -236,4 +255,4 @@ From the architecture doc's release plan:
 
 Known gaps: the live collector has not been run against real devices yet (mock data only); IOS-XE
 collects the global routing table only (no per-VRF commands yet); no IPv6; no reachability check
-when a device is added; no rate limiting on the API; no VRRP on NX-OS (Genie has no parser for it); the topology map is one level (no site grouping).
+when a device is added; no VRRP on NX-OS (Genie has no parser for it); the topology map is one level (no site grouping).

@@ -46,9 +46,11 @@ def _schema(tmp_path_factory):
 
 @pytest.fixture(autouse=True)
 def _clean():
+    from assurance.security import ratelimit
     from assurance.services import diff
 
     diff._cache.clear()
+    ratelimit._memory.reset()
     with get_engine().begin() as c:
         names = ", ".join(t.name for t in Base.metadata.sorted_tables)
         c.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))

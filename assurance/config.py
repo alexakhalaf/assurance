@@ -51,9 +51,27 @@ class Settings(BaseSettings):
     lockout_minutes: int = 15
     bootstrap_admin_password: str | None = Field(default=None, repr=False)
     cors_origins: list[str] = []
+    # Hardening. Rate limits are per minute; 0 turns a limit off.
+    rate_limit_per_minute: int = 600       # per API token, or per client IP when unauthenticated
+    rate_limit_login_per_minute: int = 10  # login and SSO endpoints, per client IP
+    max_request_bytes: int = 20 * 1024 * 1024
+    # Reverse proxies whose X-Forwarded-For is believed (IPs or CIDRs). Empty: use the socket address.
+    trusted_proxies: list[str] = []
 
     # Webhooks
     webhook_secret: str | None = Field(default=None, repr=False)
+    # OIDC single sign-on (authorization code + PKCE). Enabled when issuer and client id are set.
+    oidc_issuer: str | None = None
+    oidc_client_id: str | None = None
+    oidc_client_secret: str | None = Field(default=None, repr=False)
+    oidc_redirect_uri: str | None = None  # https://<host>/api/v1/auth/oidc/callback
+    oidc_scopes: str = "openid profile email"
+    oidc_display_name: str = "Single sign-on"
+    oidc_username_claim: str = "preferred_username"
+    oidc_groups_claim: str = "groups"
+    oidc_role_map: dict[str, str] = {}  # IdP group -> viewer | operator | admin
+    oidc_default_role: Literal["viewer", "operator", "admin", "none"] = "none"  # none = no access without a group
+    local_login: bool = True  # set false to allow only SSO (keep a break-glass admin token)
     # Email (scheduled reports)
     smtp_host: str | None = None
     smtp_port: int = 587

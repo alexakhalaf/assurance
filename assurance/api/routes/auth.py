@@ -1,15 +1,20 @@
 """Login, API tokens and user management."""
 from __future__ import annotations
 
+import secrets
 from datetime import UTC, timedelta
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from sqlalchemy import select
+from fastapi.responses import RedirectResponse
+from pydantic import BaseModel
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from ...config import get_settings
 from ...db import get_db
-from ...models import ApiToken, User, utcnow
+from ...models import ApiToken, OidcState, User, utcnow
+from ...security import oidc
 from ...security.passwords import hash_password, hash_token, new_token, verify_password
 from ...services import audit
 from ..deps import Principal, admin, client_ip, current_principal
@@ -41,8 +46,13 @@ def _issue(db: Session, user: User, name: str, kind: str, expires) -> tuple[str,
 @router.post("/auth/login", response_model=TokenOut)
 def login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
     s = get_settings()
+    if not s.local_login:
+        raise HTTPException(403, "Password sign-in is disabled; use single sign-on")
     user = db.scalar(select(User).where(User.username == body.username))
     now = utcnow()
+    if user is not None and user.auth_source == "oidc":
+        verify_password(_DUMMY_HASH, body.password)
+        raise HTTPException(401, "Invalid username or password")
     if user is None:
         verify_password(_DUMMY_HASH, body.password)
         audit.record(db, body.username, "auth.login_failed", ip=client_ip(request))
@@ -151,3 +161,109 @@ def update_user(username: str, body: UserPatch, request: Request, p: Principal =
     audit.record(db, p.name, "user.update", username, {"fields": changed}, client_ip(request))
     db.commit()
     return user
+
+
+# ------------------------------------------------------------- single sign-on
+
+NO_PASSWORD = "!" + "oidc"
+STATE_TTL = timedelta(minutes=10)
+HANDOFF_TTL = timedelta(seconds=60)
+
+
+class OidcExchangeIn(BaseModel):
+    code: str
+
+
+@router.get("/auth/oidc")
+def oidc_info():
+    """What the login page should offer."""
+    s = get_settings()
+    return {"enabled": oidc.enabled(), "name": s.oidc_display_name, "local_login": s.local_login}
+
+
+@router.get("/auth/oidc/login", include_in_schema=False)
+def oidc_login(db: Session = Depends(get_db)):
+    if not oidc.enabled():
+        raise HTTPException(404, "Single sign-on is not configured")
+    db.execute(delete(OidcState).where(OidcState.created_at < utcnow() - STATE_TTL))
+    state, nonce = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+    verifier, challenge = oidc.pkce()
+    db.add(OidcState(id=state, kind="login", nonce=nonce, verifier=verifier))
+    db.commit()
+    try:
+        url = oidc.authorize_url(state, nonce, challenge)
+    except Exception as e:
+        raise HTTPException(502, f"identity provider unavailable: {e}") from e
+    return RedirectResponse(url, status_code=302)
+
+
+def _fail(msg: str) -> RedirectResponse:
+    return RedirectResponse(f"/?sso_error={quote(msg)}", status_code=302)
+
+
+@router.get("/auth/oidc/callback", include_in_schema=False)
+def oidc_callback(request: Request, state: str = "", code: str = "", error: str | None = None,
+                  db: Session = Depends(get_db)):
+    row = db.get(OidcState, state) if state else None
+    if row is None or row.kind != "login":
+        return _fail("Sign-in expired or was not started here. Try again.")
+    db.delete(row)
+    db.commit()
+    created = row.created_at if row.created_at.tzinfo else row.created_at.replace(tzinfo=UTC)
+    if created < utcnow() - STATE_TTL:
+        return _fail("Sign-in took too long. Try again.")
+    if error or not code:
+        return _fail(f"The identity provider refused the sign-in ({error or 'no code'}).")
+    try:
+        claims = oidc.exchange(code, row.verifier, row.nonce)
+    except Exception as e:
+        audit.record(db, "oidc", "auth.sso_failed", detail={"error": str(e)[:300]}, ip=client_ip(request))
+        db.commit()
+        return _fail("Sign-in could not be verified.")
+    s = get_settings()
+    username = str(claims.get(s.oidc_username_claim) or claims.get("email") or claims["sub"])[:64]
+    role = oidc.role_for(claims)
+    if role is None:
+        audit.record(db, username, "auth.sso_denied", detail={"reason": "no mapped group"}, ip=client_ip(request))
+        db.commit()
+        return _fail("Your account has no Assurance role. Ask an administrator for access.")
+    user = db.scalar(select(User).where(User.username == username))
+    if user is not None and user.auth_source != "oidc":
+        audit.record(db, username, "auth.sso_denied", detail={"reason": "local account with this name"},
+                     ip=client_ip(request))
+        db.commit()
+        return _fail("A local account already uses this name. An administrator must resolve it.")
+    if user is None:
+        # "!" is never a valid Argon2 hash, so this account cannot sign in with a password
+        user = User(username=username, password_hash=NO_PASSWORD, role=role, auth_source="oidc")  # noqa: S106 (unusable)
+        db.add(user)
+        db.flush()
+    if not user.is_active:
+        return _fail("This account is disabled.")
+    if user.role != role:
+        audit.record(db, username, "user.role_sync", detail={"from": user.role, "to": role})
+        user.role = role
+    user.last_login_at = utcnow()
+    handoff = secrets.token_urlsafe(32)
+    db.add(OidcState(id=handoff, kind="handoff", user_id=user.id))
+    audit.record(db, username, "auth.login", detail={"method": "oidc"}, ip=client_ip(request))
+    db.commit()
+    return RedirectResponse(f"/?sso={handoff}", status_code=302)
+
+
+@router.post("/auth/oidc/exchange", response_model=TokenOut)
+def oidc_exchange(body: OidcExchangeIn, db: Session = Depends(get_db)):
+    """Trade the one-time code from the callback redirect for a session token."""
+    row = db.get(OidcState, body.code)
+    if row is None or row.kind != "handoff":
+        raise HTTPException(401, "Invalid or used sign-in code")
+    db.delete(row)
+    created = row.created_at if row.created_at.tzinfo else row.created_at.replace(tzinfo=UTC)
+    user = db.get(User, row.user_id)
+    if created < utcnow() - HANDOFF_TTL or user is None or not user.is_active:
+        db.commit()
+        raise HTTPException(401, "Sign-in code expired")
+    expires = utcnow() + timedelta(hours=get_settings().session_hours)
+    token, _ = _issue(db, user, "web session (sso)", "session", expires)
+    db.commit()
+    return TokenOut(token=token, expires_at=expires, user=UserOut.model_validate(user))
