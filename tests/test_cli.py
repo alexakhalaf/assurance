@@ -54,3 +54,21 @@ def test_cli_end_to_end(cli_api, tmp_path):
 def test_cli_reports_api_errors(cli_api):
     r = run("snapshots", "show", "nope")
     assert r.exit_code == 1 and "error 404" in r.output
+
+
+def test_cli_beta_commands(two_snapshots, cli_api, tmp_path):
+    r = run("prepost", "--pre", two_snapshots[0], "--post", two_snapshots[1])
+    assert r.exit_code == cli.EXIT_CHECKS, r.output
+    assert "Verification FAIL" in r.output and "ospf-neighbor-lost" in r.output
+    assert run("prepost", "--pre", two_snapshots[1], "--post", two_snapshots[1]).exit_code == 0
+    r = run("checks", "rules")
+    assert r.exit_code == 0 and "bgp-established" in r.output
+    r = run("checks", "show", "latest", "--fail-on-violation")
+    assert r.exit_code == cli.EXIT_CHECKS and "link-mtu-mismatch" in r.output
+    r = run("config", "diff", "yyc-dc-nxs01")
+    assert r.exit_code == 0 and "+vlan 300" in r.output
+    r = run("config", "show", "yyc-core-rtr01")
+    assert "<removed>" in r.output
+    out = tmp_path / "c.xlsx"
+    r = run("report", "changes", "--from", two_snapshots[0], "--format", "xlsx", "-o", str(out))
+    assert r.exit_code == 0 and out.read_bytes()[:2] == b"PK"

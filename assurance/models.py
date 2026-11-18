@@ -261,3 +261,38 @@ class Schedule(Base):
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+# ------------------------------------------------------------------ checks
+
+
+class CheckRule(Base):
+    """kind=custom: a user rule (definition holds it). kind=builtin: an override (enable/disable)."""
+
+    __tablename__ = "check_rules"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True)
+    kind: Mapped[str] = mapped_column(String(16), default="custom")
+    title: Mapped[str | None] = mapped_column(String(128))
+    description: Mapped[str | None] = mapped_column(String(512))
+    severity: Mapped[str] = mapped_column(String(16), default="fail")
+    definition: Mapped[dict] = mapped_column(JSONType, default=dict)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class CheckResult(Base):
+    """One violation of one rule in one snapshot. Passing rows are not stored."""
+
+    __tablename__ = "check_results"
+    __table_args__ = (Index("ix_check_snap_rule", "snapshot_id", "rule"),)
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    snapshot_id: Mapped[str] = mapped_column(ForeignKey("snapshots.id", ondelete="CASCADE"))
+    rule: Mapped[str] = mapped_column(String(96))
+    device: Mapped[str] = mapped_column(String(128))
+    key: Mapped[str] = mapped_column(String(512))
+    severity: Mapped[str] = mapped_column(String(16))
+    message: Mapped[str] = mapped_column(Text)
+    data: Mapped[dict] = mapped_column(JSONType, default=dict)

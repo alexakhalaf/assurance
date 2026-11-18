@@ -6,6 +6,10 @@
     assurance snapshot --site YYC-DC1 --label change:CHG0012345 --wait
     assurance diff previous latest
     assurance diff 24h now --table routes --fail-on-change
+    assurance prepost --label change:CHG0012345        # exit 5 if verification fails
+    assurance checks show latest --severity fail
+    assurance config diff yyc-core-rtr01 24h now
+    assurance report changes --from 24h --format xlsx -o changes.xlsx
 
 URL and token come from ASSURANCE_URL / ASSURANCE_TOKEN, or from `assurance login`
 (stored in ~/.config/assurance/config.json, mode 0600).
@@ -31,10 +35,13 @@ creds_app = typer.Typer(help="Credential profiles", no_args_is_help=True)
 app.add_typer(devices_app, name="devices")
 app.add_typer(snapshots_app, name="snapshots")
 app.add_typer(creds_app, name="credentials")
+checks_app = typer.Typer(help="Intent checks", no_args_is_help=True)
+app.add_typer(checks_app, name="checks")
 
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "assurance" / "config.json"
 EXIT_CHANGES = 3
 EXIT_FAILED = 4
+EXIT_CHECKS = 5
 
 
 def _config() -> dict:
@@ -341,6 +348,109 @@ def diff(old: str = typer.Argument("previous", help="Snapshot id, previous, ISO 
             _print_change(c)
     if fail_on_change and d["summary"]["total"]:
         raise typer.Exit(EXIT_CHANGES)
+
+
+# ----------------------------------------------------------- checks / prepost
+
+_SYM = {"pass": ("PASS", "green"), "warning": ("WARN", "yellow"), "fail": ("FAIL", "red")}
+
+
+@checks_app.command("rules")
+def checks_rules():
+    """List built-in and custom rules with their result on the latest snapshot."""
+    rules = api().get("/checks/rules").json()["rules"]
+    _table([{"id": r["id"], "severity": r["severity"], "enabled": r["enabled"],
+             "latest": (r.get("latest") or {}).get("status", "-"),
+             "violations": (r.get("latest") or {}).get("violations", "-"), "name": r["name"]} for r in rules],
+           ["id", "severity", "enabled", "latest", "violations", "name"])
+
+
+@checks_app.command("show")
+def checks_show(ref: str = typer.Argument("latest"), rule: str = None, device: str = None,
+                severity: str = typer.Option(None, help="fail | warning"),
+                as_json: bool = typer.Option(False, "--json"),
+                fail_on_violation: bool = typer.Option(False, help=f"Exit {EXIT_CHECKS} on any failing rule")):
+    """Show check violations for a snapshot."""
+    params = {k: v for k, v in {"rule": rule, "device": device, "severity": severity}.items() if v}
+    d = api().get(f"/snapshots/{ref}/checks", params=params).json()
+    if as_json:
+        typer.echo(json.dumps(d, indent=2, default=str))
+    else:
+        s = d.get("summary") or {}
+        typer.secho(f"{d['snapshot']}: {s.get('fail', 0)} failing, {s.get('warning', 0)} warning rule(s)", bold=True)
+        _table(d["violations"], ["severity", "rule", "device", "key", "message"])
+    if fail_on_violation and (d.get("summary") or {}).get("fail"):
+        raise typer.Exit(EXIT_CHECKS)
+
+
+@checks_app.command("run")
+def checks_run(ref: str = typer.Argument("latest")):
+    """Grade a snapshot again with the current rules."""
+    d = api().post("/checks/run", params={"snapshot": ref}).json()
+    typer.echo(f"{d['snapshot']}: {d['fail']} failing, {d['warning']} warning rule(s)")
+
+
+@app.command()
+def prepost(pre: str = typer.Option(None, help="Pre-change snapshot ref"),
+            post: str = typer.Option(None, help="Post-change snapshot ref"),
+            label: str = typer.Option(None, help="Use the first and last snapshot carrying this label"),
+            route_drop_pct: float = typer.Option(2.0, help="Fail when a VRF loses more than this % of routes"),
+            as_json: bool = typer.Option(False, "--json")):
+    """Pre/post change verification. Exits 5 when verification fails."""
+    body = {"pre": pre, "post": post, "label": label, "route_drop_pct": route_drop_pct}
+    r = api().post("/compare/prepost", json=body).json()
+    if as_json:
+        typer.echo(json.dumps(r, indent=2, default=str))
+    else:
+        word, color = _SYM[r["result"]]
+        typer.secho(f"Verification {word}: {r['pre']['id']} -> {r['post']['id']}", fg=color, bold=True)
+        ds = r.get("diff_summary") or {}
+        typer.echo(f"{ds.get('total', 0)} change(s) on {ds.get('devices_changed', 0)} device(s)")
+        for name in r.get("devices_not_collected_in_post", []):
+            typer.secho(f"  ? {name}: not collected after the change", fg="red")
+        for rid, c in r["checks"].items():
+            w, col = _SYM[c["status"]]
+            typer.secho(f"  {w}  {rid}  {c.get('name', '')}", fg=col)
+            for v in c.get("violations", [])[:20]:
+                typer.echo(f"        {v['device']}: {v['message']}")
+    if r["result"] == "fail":
+        raise typer.Exit(EXIT_CHECKS)
+
+
+# ------------------------------------------------------------ config / report
+
+config_app = typer.Typer(help="Device configuration", no_args_is_help=True)
+app.add_typer(config_app, name="config")
+
+
+@config_app.command("show")
+def config_show(device: str, ref: str = typer.Option("latest", "--snapshot")):
+    """Print the stored (secrets-masked) running configuration."""
+    typer.echo(api().get(f"/devices/{device}/config", params={"snapshot": ref}).text)
+
+
+@config_app.command("diff")
+def config_diff(device: str, old: str = typer.Argument("previous"), new: str = typer.Argument("latest")):
+    """Unified diff of a device's running configuration between two snapshots."""
+    text = api().get("/diffs/config", params={"device": device, "from": old, "to": new}).text
+    for line in text.splitlines():
+        color = "green" if line.startswith("+") and not line.startswith("+++") else \
+            "red" if line.startswith("-") and not line.startswith("---") else None
+        typer.secho(line, fg=color)
+
+
+@app.command()
+def report(kind: str = typer.Argument(..., help="changes | compliance | inventory"),
+           old: str = typer.Option("previous", "--from"), new: str = typer.Option("latest", "--to"),
+           fmt: str = typer.Option("html", "--format", help="html | csv | xlsx"),
+           output: Path = typer.Option(..., "--output", "-o")):
+    """Download a report."""
+    params = {"format": fmt, "snapshot": new}
+    if kind == "changes":
+        params.update({"from": old, "to": new})
+    r = api().get(f"/reports/{kind}", params=params)
+    output.write_bytes(r.content)
+    typer.echo(f"wrote {output} ({len(r.content)} bytes)")
 
 
 def main() -> None:

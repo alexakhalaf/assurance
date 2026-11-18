@@ -203,4 +203,155 @@ def normalize(genie: dict[str, dict]) -> dict:
         "routes": r,
         "arp": arp(genie.get("arp"), interface_vrfs(r)),
         "neighbors": {**cdp(genie.get("cdp")), **lldp(genie.get("lldp"))},
+        **{t: fn(genie.get(t)) for t, fn in TECH_NORMALIZERS.items()},
     }
+
+
+# ---------------------------------------------------------------------- bgp
+
+def _int(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def bgp(g: dict) -> dict:
+    """Neighbors per VRF and address family. Up/down time and message counters are left out."""
+    out = {}
+    for vrf, v in (g or {}).get("vrf", {}).items():
+        for nbr, n in v.get("neighbor", {}).items():
+            for af, a in n.get("address_family", {}).items():
+                state_pfx = str(a.get("state_pfxrcd", "")).strip()
+                state = (a.get("state") or "").lower()
+                if not state:
+                    state = "established" if state_pfx.isdigit() else (state_pfx.lower() or "unknown")
+                pfx = _int(a.get("prefix_received"))
+                if pfx is None and state_pfx.isdigit():
+                    pfx = int(state_pfx)
+                out[f"{vrf}|{nbr}|{af}"] = {
+                    "vrf": vrf,
+                    "neighbor": nbr,
+                    "address_family": af,
+                    "remote_as": _int(a.get("as")),
+                    "local_as": _int(a.get("local_as")) or _int(g.get("bgp_id")),
+                    "router_id": a.get("route_identifier"),
+                    "state": state,
+                    "prefixes_received": pfx,
+                }
+    return out
+
+
+# --------------------------------------------------------------------- ospf
+
+def _ospf_row(vrf, ifname, nbr_id, n):
+    raw_state = (n.get("state") or "").replace(" ", "")
+    state, _, role = raw_state.partition("/")
+    return {
+        "vrf": vrf,
+        "interface": expand_ifname(ifname),
+        "neighbor_id": n.get("neighbor_router_id") or nbr_id,
+        "address": n.get("address"),
+        "state": state.lower(),
+        "role": (role or "-").upper() if role not in ("", "-") else "-",
+    }
+
+
+def ospf(g: dict) -> dict:
+    out = {}
+    g = g or {}
+    # IOS-XE: {interfaces: {if: {neighbors: {id: {...}}}}}
+    for ifname, i in g.get("interfaces", {}).items():
+        for nid, n in i.get("neighbors", {}).items():
+            r = _ospf_row("default", ifname, nid, n)
+            out[f"{r['vrf']}|{r['interface']}|{r['neighbor_id']}"] = r
+    # NX-OS: {vrf: {v: {address_family: {ipv4: {instance: {id: {interfaces: ...}}}}}}}
+    for vrf, v in g.get("vrf", {}).items():
+        for af in v.get("address_family", {}).values():
+            for inst in af.get("instance", {}).values():
+                for ifname, i in inst.get("interfaces", {}).items():
+                    for nid, n in i.get("neighbors", {}).items():
+                        r = _ospf_row(vrf, ifname, nid, n)
+                        out[f"{r['vrf']}|{r['interface']}|{r['neighbor_id']}"] = r
+    return out
+
+
+# ---------------------------------------------------------------------- mac
+
+def mac(g: dict) -> dict:
+    """MAC address table. Ages are volatile and dropped."""
+    out = {}
+    for vlan, v in (g or {}).get("mac_table", {}).get("vlans", {}).items():
+        for m, e in v.get("mac_addresses", {}).items():
+            ifs = sorted(expand_ifname(i) for i in e.get("interfaces", {}))
+            types = {i.get("mac_type") or i.get("entry_type") for i in e.get("interfaces", {}).values()}
+            mac_n = normalize_mac(m)
+            out[f"{vlan}|{mac_n}"] = {
+                "vlan": vlan,
+                "mac": mac_n,
+                "interfaces": ifs,
+                "type": next(iter(sorted(t for t in types if t)), None),
+            }
+    return out
+
+
+# -------------------------------------------------------------------- vlans
+
+def vlans(g: dict) -> dict:
+    out = {}
+    for vid, v in (g or {}).get("vlans", {}).items():
+        out[str(vid)] = {
+            "vlan_id": _int(v.get("vlan_id", vid)),
+            "name": v.get("name"),
+            "state": v.get("state"),
+            "interfaces": sorted(expand_ifname(i) for i in v.get("interfaces", []) or []),
+        }
+    return out
+
+
+# --------------------------------------------------------------------- vrfs
+
+def vrfs(g: dict) -> dict:
+    out = {}
+    g = g or {}
+    for name, v in (g.get("vrf") or g.get("vrfs") or {}).items():
+        out[name] = {
+            "name": name,
+            "route_distinguisher": v.get("route_distinguisher"),
+            "state": (v.get("vrf_state") or "up").lower(),
+            "interfaces": sorted(expand_ifname(i) for i in v.get("interfaces", []) or []),
+        }
+    return out
+
+
+# ----------------------------------------------------------------- hardware
+
+def hardware(g: dict) -> dict:
+    """Chassis, modules, PSUs, fans, optics: anything in 'show inventory' with a PID."""
+    out = {}
+
+    def walk(node, name_hint=None):
+        if not isinstance(node, dict):
+            return
+        if "pid" in node and ("sn" in node or "serial_number" in node or "descr" in node or "description" in node):
+            name = node.get("name") or name_hint or node["pid"]
+            key = name
+            n = 2
+            while key in out:
+                key = f"{name} #{n}"
+                n += 1
+            out[key] = {
+                "name": name,
+                "description": node.get("descr") or node.get("description"),
+                "pid": (node.get("pid") or "").strip() or None,
+                "serial": (node.get("sn") or node.get("serial_number") or "").strip() or None,
+            }
+            return
+        for k, v in node.items():
+            walk(v, k if isinstance(k, str) else None)
+
+    walk(g or {})
+    return out
+
+
+TECH_NORMALIZERS = {"bgp": bgp, "ospf": ospf, "mac": mac, "vlans": vlans, "vrfs": vrfs, "hardware": hardware}

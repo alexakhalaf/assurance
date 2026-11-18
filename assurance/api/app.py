@@ -17,7 +17,7 @@ from ..config import get_settings
 from ..db import session_scope
 from ..logging_setup import configure_logging, request_id
 from . import errors
-from .routes import admin, auth, inventory, snapshots
+from .routes import admin, analysis, auth, checks, inventory, snapshots
 
 log = logging.getLogger(__name__)
 
@@ -71,7 +71,7 @@ def create_app() -> FastAPI:
         return response
 
     api = APIRouter(prefix="/api/v1")
-    for r in (auth.router, inventory.router, snapshots.router, admin.router):
+    for r in (auth.router, inventory.router, snapshots.router, checks.router, analysis.router, admin.router):
         api.include_router(r)
     app.include_router(api)
 

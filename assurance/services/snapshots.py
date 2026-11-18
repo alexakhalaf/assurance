@@ -19,8 +19,8 @@ from sqlalchemy.orm import Session
 
 from .. import jobs, metrics
 from ..collection.collectors import LiveCollector, MockCollector
-from ..collection.commands import COMMANDS
-from ..collection.pipeline import parse_device
+from ..collection.commands import COMMANDS, all_commands
+from ..collection.pipeline import parse_device, sanitize_raw
 from ..collection.target import Target
 from ..config import get_settings
 from ..db import session_scope
@@ -117,16 +117,18 @@ def run_device_collection(collection_id: int) -> None:
             platform = device.platform
             target = Target(device.name, device.host, device.platform, device.port, device.protocol)
             collector = _collector_for(snap, device, db)
-            raw = collector.collect(target)
+            raw = sanitize_raw(target, collector.collect(target))
             genie, norm, warnings = parse_device(target, raw)
             for w in warnings:
                 metrics.PARSER_WARNINGS.labels(platform, w.split(":", 1)[0]).inc()
 
             parser_version = _genie_version()
-            for table, cmd in COMMANDS[target.platform].items():
+            for table, cmd in all_commands(target.platform).items():
                 key, digest, size = put_text(raw.get(table, ""), "raw")
                 db.add(RawOutput(snapshot_id=snapshot_id, device_name=device_name, command=cmd, kind="raw",
                                  object_key=key, sha256=digest, size=size, parser_version=parser_version))
+                if table not in COMMANDS[target.platform]:
+                    continue
                 gkey, gdigest, gsize = put_text(json.dumps(genie.get(table, {}), sort_keys=True), "genie")
                 db.add(RawOutput(snapshot_id=snapshot_id, device_name=device_name, command=cmd, kind="genie",
                                  object_key=gkey, sha256=gdigest, size=gsize, parser_version=parser_version))
@@ -224,6 +226,13 @@ def finalize(snapshot_id: str) -> None:
                                       "removed": s["removed"], "changed": s["changed"],
                                       "devices_changed": s["devices_changed"],
                                       "by_table": {t: sum(v.values()) for t, v in s["by_table"].items()}}
+        if snap.status in DIFFABLE:
+            from .checks import run_snapshot_checks
+
+            try:
+                summary["checks"] = run_snapshot_checks(db, snap)
+            except Exception:  # grading must never lose a snapshot
+                log.exception("checks failed for snapshot %s", snapshot_id)
         snap.summary = summary
         metrics.SNAPSHOTS.labels(snap.status, snap.trigger).inc()
         callback = snap.callback_url

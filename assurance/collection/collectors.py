@@ -10,7 +10,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from .commands import COMMANDS, command_filename
+from .commands import all_commands, command_filename
 from .target import Credentials, Target
 
 log = logging.getLogger(__name__)
@@ -29,7 +29,7 @@ class MockCollector:
         if not ddir.is_dir():
             raise CollectionError(f"no mock data at {ddir}")
         raw = {}
-        for table, cmd in COMMANDS[device.platform].items():
+        for table, cmd in all_commands(device.platform).items():
             f = ddir / command_filename(cmd)
             raw[table] = f.read_text() if f.exists() else ""
         return raw
@@ -68,7 +68,7 @@ class LiveCollector:
         try:
             dev.connect(log_stdout=False, learn_hostname=True, init_config_commands=[],
                         connection_timeout=self.timeout)
-            for table, cmd in COMMANDS[device.platform].items():
+            for table, cmd in all_commands(device.platform).items():
                 try:
                     raw[table] = dev.execute(cmd, timeout=self.timeout)
                 except Exception as e:  # e.g. "% LLDP is not enabled"

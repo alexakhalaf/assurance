@@ -1,0 +1,86 @@
+
+!Command: show running-config
+!Running configuration last done at: Wed Nov 18 07:40:10 2026
+!Time: Wed Nov 18 08:00:00 2026
+
+version 10.3(5) Bios:version
+hostname yyc-dc-nxs01
+vdc yyc-dc-nxs01 id 1
+  limit-resource vlan minimum 16 maximum 4094
+
+feature tacacs+
+feature ospf
+feature bgp
+feature interface-vlan
+feature lldp
+
+username admin password 5 $5$KLMNOP$abcdefghijklmnopqrstuvwxyzABCDEF0123456  role network-admin
+tacacs-server host 10.250.0.20 key 7 "fewhg123"
+snmp-server community Wj3tN0c-r0 group network-operator
+ntp server 10.250.0.10 use-vrf management
+ntp server 10.250.0.11 use-vrf management
+
+ip route 0.0.0.0/0 10.10.1.1
+ip route 10.40.0.0/24 10.20.100.60
+
+vlan 1,100,200,300
+vlan 100
+  name servers
+vlan 200
+  name storage
+vlan 300
+  name backup
+
+vrf context management
+  ip route 0.0.0.0/0 10.250.0.1
+
+interface Vlan100
+  description servers
+  no shutdown
+  mtu 9216
+  ip address 10.20.100.1/24
+  ip router ospf 1 area 0.0.0.0
+
+interface Ethernet1/1
+  description to yyc-core-rtr01 Gi1
+  no switchport
+  mtu 9216
+  ip address 10.10.1.2/30
+  ip ospf network point-to-point
+  ip router ospf 1 area 0.0.0.0
+  no shutdown
+
+interface Ethernet1/2
+  description to yyc-esx01 vmnic0
+  switchport mode trunk
+  switchport trunk allowed vlan 100,200
+  mtu 9216
+  no shutdown
+
+interface Ethernet1/3
+  description to yyc-esx03 vmnic0
+  switchport access vlan 100
+  mtu 9216
+  no shutdown
+
+interface Ethernet1/4
+  shutdown
+
+interface mgmt0
+  description oob
+  vrf member management
+  ip address 10.250.0.11/24
+
+interface loopback0
+  description router-id
+  ip address 10.10.0.11/32
+  ip router ospf 1 area 0.0.0.0
+
+router ospf 1
+  router-id 10.10.0.11
+router bgp 65010
+  router-id 10.10.0.11
+  neighbor 10.10.0.1
+    remote-as 65010
+    update-source loopback0
+    address-family ipv4 unicast

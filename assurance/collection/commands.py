@@ -1,7 +1,8 @@
 """Commands run on each platform, keyed by the data table they feed.
 
-Every command here has a Genie parser for that OS. Raw text is always kept, so
-outputs can be re-parsed later when Genie parsers improve.
+Every parsed command has a Genie parser for that OS. TEXT_COMMANDS are stored as text and
+normalized by Assurance itself (running config). Raw text is always kept, so outputs can be
+re-parsed later when Genie parsers improve.
 """
 from .target import IOS_XE, NX_OS
 
@@ -13,6 +14,12 @@ COMMANDS = {
         "arp": "show ip arp",
         "cdp": "show cdp neighbors detail",
         "lldp": "show lldp neighbors detail",
+        "bgp": "show bgp all summary",
+        "ospf": "show ip ospf neighbor",
+        "mac": "show mac address-table",
+        "vlans": "show vlan",
+        "vrfs": "show vrf",
+        "hardware": "show inventory",
     },
     NX_OS: {
         "version": "show version",
@@ -21,8 +28,24 @@ COMMANDS = {
         "arp": "show ip arp vrf all",
         "cdp": "show cdp neighbors detail",
         "lldp": "show lldp neighbors detail",
+        "bgp": "show bgp vrf all all summary",
+        "ospf": "show ip ospf neighbor vrf all",
+        "mac": "show mac address-table",
+        "vlans": "show vlan",
+        "vrfs": "show vrf",
+        "hardware": "show inventory",
     },
 }
+
+# Collected as text, not parsed by Genie.
+TEXT_COMMANDS = {
+    IOS_XE: {"config": "show running-config"},
+    NX_OS: {"config": "show running-config"},
+}
+
+
+def all_commands(platform: str) -> dict[str, str]:
+    return {**COMMANDS[platform], **TEXT_COMMANDS[platform]}
 
 
 def command_filename(command: str) -> str:

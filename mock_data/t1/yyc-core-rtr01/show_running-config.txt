@@ -1,0 +1,101 @@
+Building configuration...
+
+Current configuration : 2311 bytes
+!
+! Last configuration change at 08:01:12 UTC Mon Nov 16 2026 by netops
+!
+version 17.9
+service timestamps debug datetime msec
+service timestamps log datetime msec
+service password-encryption
+platform qfp utilization monitor load 80
+!
+hostname yyc-core-rtr01
+!
+boot-start-marker
+boot-end-marker
+!
+vrf definition Mgmt-intf
+ !
+ address-family ipv4
+ exit-address-family
+!
+logging buffered 64000 informational
+enable secret 9 $9$aBcDeFgHiJkLmN$OpQrStUvWxYz0123456789abcdefghijklmnopqrstu
+!
+aaa new-model
+aaa authentication login default group tacacs+ local
+aaa authorization exec default group tacacs+ local
+!
+username netops privilege 15 secret 9 $9$zYxWvUtSrQpOnM$lkjihgfedcba9876543210ZYXWVUTSRQPONMLKJIH
+!
+interface Loopback0
+ description router-id
+ ip address 10.10.0.1 255.255.255.255
+!
+interface GigabitEthernet1
+ description to yyc-dc-nxs01 Eth1/1
+ mtu 9000
+ ip address 10.10.1.1 255.255.255.252
+ ip ospf network point-to-point
+ negotiation auto
+!
+interface GigabitEthernet2
+ description to yyc-fw01 ge-0/0/0
+ ip address 10.10.2.1 255.255.255.252
+ negotiation auto
+!
+interface GigabitEthernet3
+ description to yyc-core-rtr02 Gi3
+ mtu 9000
+ ip address 10.10.3.1 255.255.255.252
+ ip ospf network point-to-point
+ negotiation auto
+!
+interface GigabitEthernet4
+ description spare
+ vrf forwarding Mgmt-intf
+ no ip address
+ shutdown
+ negotiation auto
+!
+router ospf 1
+ router-id 10.10.0.1
+ passive-interface Loopback0
+ network 10.10.0.1 0.0.0.0 area 0
+ network 10.10.1.0 0.0.0.3 area 0
+ network 10.10.3.0 0.0.0.3 area 0
+!
+router bgp 65010
+ bgp router-id 10.10.0.1
+ bgp log-neighbor-changes
+ neighbor 10.10.0.11 remote-as 65010
+ neighbor 10.10.0.11 update-source Loopback0
+ neighbor 10.10.2.2 remote-as 65020
+ neighbor 10.10.2.2 password 7 0822455D0A16
+ !
+ address-family ipv4
+  neighbor 10.10.0.11 activate
+  neighbor 10.10.2.2 activate
+ exit-address-family
+!
+ip forward-protocol nd
+no ip http server
+no ip http secure-server
+ip ssh version 2
+!
+snmp-server community Wj3tN0c-r0 RO 10
+snmp-server location YYC-DC1 Row 4 Rack 12
+tacacs server ISE01
+ address ipv4 10.250.0.20
+ key 7 13061E010803557878
+!
+ntp server 10.250.0.10
+ntp server 10.250.0.11
+!
+line con 0
+ stopbits 1
+line vty 0 4
+ transport input ssh
+!
+end

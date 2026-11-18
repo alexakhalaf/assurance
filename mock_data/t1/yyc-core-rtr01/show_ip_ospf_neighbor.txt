@@ -1,0 +1,4 @@
+
+Neighbor ID     Pri   State           Dead Time   Address         Interface
+10.10.0.11        0   FULL/  -        00:00:35    10.10.1.2       GigabitEthernet1
+10.10.0.2         0   FULL/  -        00:00:38    10.10.3.2       GigabitEthernet3
