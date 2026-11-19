@@ -101,18 +101,22 @@ def snmp(text: str) -> dict:
     """SNMP settings from a (masked) running config. Community strings are never present: they
     were masked before this runs, so communities are keyed by position and access."""
     out: dict[str, dict] = {}
-    n = 0
     for line in _top_lines(text):
         w = line.split()
         if line.startswith("snmp-server community "):
-            n += 1
             rest = w[3:]
             access = next((x.lower() for x in rest if x.upper() in ("RO", "RW")), None)
             group = rest[rest.index("group") + 1] if "group" in rest and rest.index("group") + 1 < len(rest) else None
             acl = next((x for x in rest if x.upper() not in ("RO", "RW", "GROUP") and x != group), None)
-            out[f"community#{n}"] = {"kind": "community", "name": f"community #{n}",
-                                     "access": access or ("ro" if group == "network-operator" else group),
-                                     "acl": acl, "version": "2c"}
+            access = access or ("ro" if group == "network-operator" else group)
+            # Keyed by what is known about it (the string itself is masked), not by position: removing
+            # one community must not show every later one as changed.
+            base = f"community|{access or '-'}|{acl or '-'}"
+            key, k = base, 2
+            while key in out:
+                key, k = f"{base}#{k}", k + 1
+            out[key] = {"kind": "community", "name": f"{(access or '?').upper()} community"
+                        + (f" (acl {acl})" if acl else ""), "access": access, "acl": acl, "version": "2c"}
         elif line.startswith("snmp-server host ") and len(w) > 2:
             host = w[2]
             row = out.setdefault(f"host|{host}", {"kind": "host", "name": host, "notification": "traps",

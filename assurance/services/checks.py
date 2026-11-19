@@ -44,13 +44,34 @@ class SnapshotData:
         self.tables: dict[str, dict[str, dict[str, dict]]] = {}
         self.devices: dict[str, dict] = {}
         self.collected: set[str] = set()
-        for name, meta, status in db.execute(select(
-                DeviceCollection.device_name, DeviceCollection.device_meta, DeviceCollection.status)
-                .where(DeviceCollection.snapshot_id == snap.id)):
+        self.failed: dict[str, set[str]] = {}  # device -> tables whose command failed (unknown, not empty)
+        for name, meta, status, failed in db.execute(select(
+                DeviceCollection.device_name, DeviceCollection.device_meta, DeviceCollection.status,
+                DeviceCollection.failed_tables).where(DeviceCollection.snapshot_id == snap.id)):
             self.devices[name] = {**(meta or {}), "status": status}
             if status in ("ok", "partial"):
                 self.collected.add(name)
+            if failed:
+                self.failed[name] = set(failed)
         self._route_counts: dict[str, dict[str, int]] | None = None
+        self._aliases: dict[str, str] | None = None
+
+    def ok(self, device: str, table: str) -> bool:
+        """The device was collected and this table's command worked, so missing rows really are gone."""
+        return device in self.collected and table not in self.failed.get(device, ())
+
+    def resolve(self, name: str | None) -> str | None:
+        """Inventory name of a neighbor as CDP/LLDP names it. Neighbors report the device's hostname,
+        which may differ from its inventory name in case or domain ('YYC-CORE-RTR01.corp' vs
+        'yyc-core-rtr01'); the hostname collected in 'show version' is matched too."""
+        if not name:
+            return name
+        if self._aliases is None:
+            self._aliases = device_aliases(self.devices, self.table_all("facts"))
+        return self._aliases.get(_alias(name), name)
+
+    def table_all(self, table: str) -> dict[str, dict[str, dict]]:
+        return self._load(table)
 
     def _load(self, table: str) -> dict[str, dict[str, dict]]:
         if table not in self.tables:
@@ -66,6 +87,8 @@ class SnapshotData:
     def rows(self, table: str):
         t = self._load(table)
         for device in sorted(self.collected):
+            if table in self.failed.get(device, ()):
+                continue
             for key, row in sorted(t.get(device, {}).items()):
                 yield device, key, row
 
@@ -83,6 +106,23 @@ class SnapshotData:
                     .group_by(StateRow.device_name, vrf)):
                 self._route_counts[d][v] = n
         return self._route_counts.get(device, {})
+
+
+def _alias(name: str) -> str:
+    name = name.strip().lower()
+    return name if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", name) else name.split(".")[0]
+
+
+def device_aliases(devices, facts: dict[str, dict[str, dict]]) -> dict[str, str]:
+    """{short lower-case name: inventory name} from inventory names and collected hostnames."""
+    out: dict[str, str] = {}
+    for name in devices:
+        hostname = ((facts.get(name) or {}).get("device") or {}).get("hostname")
+        if hostname:
+            out.setdefault(_alias(hostname), name)
+    for name in devices:  # an inventory name wins over another device's hostname
+        out[_alias(name)] = name
+    return out
 
 
 @dataclass
@@ -115,9 +155,13 @@ class Rule:
 _SPARE = re.compile(r"(?i)\b(spare|unused|reserved|shut)\b")
 
 
+_ADMIN_DOWN = re.compile(r"\badmin|^shut")
+
+
 def _bgp_established(s: SnapshotData, **_):
     for d, k, r in s.rows("bgp"):
-        if r.get("state") != "established":
+        # "Idle (Admin)" / "Shut (Admin)": shut down on purpose, not a failure
+        if r.get("state") != "established" and not _ADMIN_DOWN.search(r.get("state") or ""):
             yield Violation(d, k, f"BGP neighbor {r['neighbor']} (AS {r.get('remote_as')}, vrf {r['vrf']}) "
                                   f"is {r.get('state')}", r)
 
@@ -139,8 +183,8 @@ def _link_pairs(s: SnapshotData):
     """(device, local_if, remote_device, remote_if) for neighbors whose far end is also collected."""
     seen = set()
     for d, _, n in s.rows("neighbors"):
-        rd, ri = n.get("remote_device"), n.get("remote_interface")
-        if rd not in s.collected or not ri:
+        rd, ri = s.resolve(n.get("remote_device")), n.get("remote_interface")
+        if rd not in s.collected or not ri or not s.ok(rd, "interfaces") or not s.ok(d, "interfaces"):
             continue
         pair = tuple(sorted([(d, n["local_interface"]), (rd, ri)]))
         if pair in seen:
@@ -215,7 +259,8 @@ def _ntp_synchronized(s: SnapshotData, **_):
 
 def _fhrp_redundant(s: SnapshotData, **_):
     for d, k, r in s.rows("fhrp"):
-        if r.get("state") not in ("active", "standby", "master", "backup"):
+        # "listen": a third router in an HSRP group, healthy by design
+        if r.get("state") not in ("active", "standby", "listen", "master", "backup"):
             yield Violation(d, k, f"{r['protocol'].upper()} group {r['group']} on {r['interface']} "
                                   f"is {r.get('state')}", r)
         elif r.get("protocol") == "hsrp" and not r.get("standby_router"):
@@ -239,7 +284,7 @@ def _snmp_acl(s: SnapshotData, **_):
 
 def _bgp_lost(s: SnapshotData, prev: SnapshotData, **_):
     for d, k, r in prev.rows("bgp"):
-        if d not in s.collected or r.get("state") != "established":
+        if not s.ok(d, "bgp") or r.get("state") != "established":
             continue
         now = s.table("bgp", d).get(k)
         if now is None or now.get("state") != "established":
@@ -249,7 +294,7 @@ def _bgp_lost(s: SnapshotData, prev: SnapshotData, **_):
 
 def _ospf_lost(s: SnapshotData, prev: SnapshotData, **_):
     for d, k, r in prev.rows("ospf"):
-        if d not in s.collected or r.get("state") != "full":
+        if not s.ok(d, "ospf") or r.get("state") != "full":
             continue
         now = s.table("ospf", d).get(k)
         if now is None or now.get("state") != "full":
@@ -259,7 +304,7 @@ def _ospf_lost(s: SnapshotData, prev: SnapshotData, **_):
 
 def _interface_went_down(s: SnapshotData, prev: SnapshotData, **_):
     for d, k, r in prev.rows("interfaces"):
-        if d not in s.collected or r.get("oper_status") != "up":
+        if not s.ok(d, "interfaces") or r.get("oper_status") != "up":
             continue
         now = s.table("interfaces", d).get(k)
         if now is None or now.get("oper_status") != "up":
@@ -269,14 +314,14 @@ def _interface_went_down(s: SnapshotData, prev: SnapshotData, **_):
 
 def _neighbor_lost(s: SnapshotData, prev: SnapshotData, **_):
     for d, k, r in prev.rows("neighbors"):
-        if d in s.collected and k not in s.table("neighbors", d):
+        if s.ok(d, "neighbors") and k not in s.table("neighbors", d):
             yield Violation(d, k, f"{r['protocol'].upper()} neighbor {r['remote_device']} on "
                                   f"{r['local_interface']} disappeared", r)
 
 
 def _stp_root_changed(s: SnapshotData, prev: SnapshotData, **_):
     for d, k, r in prev.rows("stp"):
-        if d not in s.collected:
+        if not s.ok(d, "stp"):
             continue
         now = s.table("stp", d).get(k)
         if now and now.get("root_address") != r.get("root_address"):
@@ -286,7 +331,7 @@ def _stp_root_changed(s: SnapshotData, prev: SnapshotData, **_):
 
 def _fhrp_state_changed(s: SnapshotData, prev: SnapshotData, **_):
     for d, k, r in prev.rows("fhrp"):
-        if d not in s.collected:
+        if not s.ok(d, "fhrp"):
             continue
         now = s.table("fhrp", d).get(k)
         if now is None or now.get("state") != r.get("state"):
@@ -297,7 +342,7 @@ def _fhrp_state_changed(s: SnapshotData, prev: SnapshotData, **_):
 
 def _portchannel_member_lost(s: SnapshotData, prev: SnapshotData, **_):
     for d, k, r in prev.rows("portchannels"):
-        if d not in s.collected:
+        if not s.ok(d, "portchannels"):
             continue
         now = s.table("portchannels", d).get(k) or {}
         lost = sorted(set(r.get("members_bundled") or []) - set(now.get("members_bundled") or []))
@@ -307,6 +352,8 @@ def _portchannel_member_lost(s: SnapshotData, prev: SnapshotData, **_):
 
 def _route_count_drop(s: SnapshotData, prev: SnapshotData, threshold_pct: float = 2.0, **_):
     for d in sorted(prev.collected & s.collected):
+        if not (prev.ok(d, "routes") and s.ok(d, "routes")):
+            continue
         before, after = prev.route_counts(d), s.route_counts(d)
         for vrf, n in before.items():
             m = after.get(vrf, 0)
@@ -459,7 +506,10 @@ def _custom_fn(defn: dict):
             for d, k, r in s.rows(defn["table"]):
                 if not _in_scope(s.devices.get(d, {}), scope, d):
                     continue
-                if not all(_OPS[c["op"]](r.get(c["field"]), c.get("value")) for c in where):
+                try:
+                    if not all(_OPS[c["op"]](r.get(c["field"]), c.get("value")) for c in where):
+                        continue
+                except (TypeError, ValueError):  # e.g. "gt" on a non-numeric value: the filter doesn't match
                     continue
                 try:
                     ok = _OPS[cond["op"]](r.get(cond["field"]), cond.get("value"))

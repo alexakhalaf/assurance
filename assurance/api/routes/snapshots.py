@@ -253,7 +253,8 @@ def get_diff(
     a_ref = from_ or since or "previous"
     b_ref = to or until or "latest"
     try:
-        a, b = resolve_ref(db, a_ref), resolve_ref(db, b_ref)
+        b = resolve_ref(db, b_ref)
+        a = resolve_ref(db, a_ref, relative_to=b)
     except SnapshotNotFound as e:
         raise HTTPException(404, str(e)) from e
     if table:

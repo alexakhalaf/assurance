@@ -267,6 +267,13 @@ changes. Upgrading to 0.5:
 - Interfaces: `speed` is now `speed_mbps`, a number in Mb/s (it was the device's text, e.g. `1000mbps`),
   and `duplex` is `full`, `half` or `auto`. Snapshots taken before the upgrade keep the old field, so the
   first diff afterwards shows every interface's speed as changed once.
+- Migration 0010 adds `device_collections.failed_tables`. A command that fails on a device (timeout,
+  refused by command authorization, parser error) now leaves its tables "not compared" for that device
+  instead of empty, so diffs and pre/post checks no longer report all of its rows as removed.
+- Normalization changes that show once in the first diff across the upgrade: interface names are
+  canonical on every table (NX-OS `port-channel10` / `loopback0` become `Port-channel10` / `Loopback0`),
+  IPv6 routes and IOS-XE per-VRF routes and ARP are new rows, NTP peers outside the default VRF are
+  keyed `<vrf>|<peer>`, and SNMP communities are keyed by access and ACL instead of position.
 - Compose now publishes only HTTPS (443) through the `proxy` service; set `ASSURANCE_HOSTNAME` and
   `ASSURANCE_TLS` in `.env` (see `.env.example`). The API port is bound to 127.0.0.1.
 
@@ -350,6 +357,6 @@ From the architecture doc's release plan:
 - **1.0 GA:** OIDC SSO, rate limiting and hardening, backup/restore, OpenTelemetry tracing, Helm HA
   deployment (done); load test, pen test.
 
-Known gaps: the live collector has not been run against real devices yet (mock data only); IOS-XE
-collects the global routing table only (no per-VRF commands yet); no IPv6; no reachability check
-when a device is added; no VRRP on NX-OS (Genie has no parser for it); the topology map is one level (no site grouping).
+Known gaps: the live collector has not been run against real devices yet (mock data only); IPv6
+is covered for routes only (no IPv6 interface addresses or neighbor discovery table); OSPF on IOS-XE
+is not split by VRF; no reachability check when a device is added; no VRRP on NX-OS (Genie has no parser for it); the topology map is one level (no site grouping).

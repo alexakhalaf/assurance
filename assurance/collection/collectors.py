@@ -7,33 +7,63 @@ Both return raw text; parsing happens afterwards, offline, through Genie.
 from __future__ import annotations
 
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from .commands import all_commands, command_filename
+from .commands import COMMANDS, all_commands, command_filename, vrf_commands
 from .hostkeys import HostKey, known_hosts
 from .target import Credentials, Target
 
 log = logging.getLogger(__name__)
 
 
+_UNSUPPORTED = re.compile(r"%\s*(Invalid|Incomplete|Ambiguous) (input|command)", re.I)
+
+
 class CollectionError(Exception):
     pass
 
 
+def vrf_names(platform: str, show_vrf: str | None) -> list[str]:
+    """VRF names from 'show vrf' output (empty when it can't be parsed)."""
+    if not show_vrf:
+        return []
+    from . import genie_parse
+    from .normalize import vrfs
+
+    try:
+        return sorted(vrfs(genie_parse.parse(platform, COMMANDS[platform]["vrfs"], show_vrf)))
+    except Exception as e:
+        log.warning("could not read VRF names: %s", e)
+        return []
+
+
 class MockCollector:
+    """Reads <root>/<device>/<command file>.txt. A missing file is empty output (feature not in
+    use); a file named <command file>.txt.error makes that command fail, as a timeout would."""
+
     def __init__(self, root: str | Path):
         self.root = Path(root)
 
-    def collect(self, device: Target) -> dict[str, str]:
+    def collect(self, device: Target) -> dict[str, str | None]:
         ddir = self.root / device.name
         if not ddir.is_dir():
             raise CollectionError(f"no mock data at {ddir}")
-        raw = {}
+        raw: dict[str, str | None] = {}
         for table, cmd in all_commands(device.platform).items():
-            f = ddir / command_filename(cmd)
-            raw[table] = f.read_text() if f.exists() else ""
+            raw[table] = self._read(ddir, cmd, "")
+        for key, cmd in vrf_commands(device.platform, vrf_names(device.platform, raw.get("vrfs"))).items():
+            if (ddir / command_filename(cmd)).exists() or (ddir / (command_filename(cmd) + ".error")).exists():
+                raw[key] = self._read(ddir, cmd, "")
         return raw
+
+    @staticmethod
+    def _read(ddir: Path, cmd: str, default):
+        f = ddir / command_filename(cmd)
+        if (ddir / (command_filename(cmd) + ".error")).exists():
+            return None
+        return f.read_text() if f.exists() else default
 
 
 class LiveCollector:
@@ -72,17 +102,20 @@ class LiveCollector:
                 return self._collect(self._testbed_device(device, opts), device)
         return self._collect(self._testbed_device(device), device)
 
-    def _collect(self, dev, device: Target) -> dict[str, str]:
-        raw = {}
+    def _collect(self, dev, device: Target) -> dict[str, str | None]:
+        """Output per command; None for a command that failed (timeout, dropped session). A failed
+        command makes its tables unknown for this snapshot rather than empty."""
+        raw: dict[str, str | None] = {}
         try:
             dev.connect(log_stdout=False, learn_hostname=True, init_config_commands=[],
                         connection_timeout=self.timeout)
-            for table, cmd in all_commands(device.platform).items():
-                try:
-                    raw[table] = dev.execute(cmd, timeout=self.timeout)
-                except Exception as e:  # e.g. "% LLDP is not enabled"
-                    log.warning("%s: '%s' failed: %s", device.name, cmd, e)
-                    raw[table] = ""
+            fixed = all_commands(device.platform)
+            for table, cmd in fixed.items():
+                raw[table] = self._run(dev, device, cmd)
+            if all(raw.get(t) is None for t in fixed):
+                raise CollectionError("every command failed")
+            for key, cmd in vrf_commands(device.platform, vrf_names(device.platform, raw.get("vrfs"))).items():
+                raw[key] = self._run(dev, device, cmd)
         except Exception as e:
             raise CollectionError(f"{device.name} ({device.host}): {e}") from e
         finally:
@@ -91,6 +124,19 @@ class LiveCollector:
             except Exception:
                 pass
         return raw
+
+    def _run(self, dev, device: Target, cmd: str) -> str | None:
+        try:
+            # error_pattern=[]: a device error ("% Invalid input" for an unsupported command) comes back
+            # as text, and the pipeline reads it as "no data". Only a real failure raises.
+            return dev.execute(cmd, timeout=self.timeout, error_pattern=[])
+        except Exception as e:
+            if _UNSUPPORTED.search(str(e)):
+                return ""
+            log.warning("%s: '%s' failed: %s", device.name, cmd, e)
+            return None
+            log.warning("%s: '%s' failed: %s", device.name, cmd, e)
+            return None
 
 
 def collect_many(collector, devices: list[Target], workers: int = 10):

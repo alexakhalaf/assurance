@@ -16,6 +16,7 @@ from ...collection.configtext import unified_diff
 from ...db import get_db
 from ...exports import safe_cell
 from ...models import CheckResult, Device, DeviceCollection, RawOutput, Snapshot, StateRow
+from ...services.checks import _alias, device_aliases
 from ...services.diff import SnapshotNotFound, diff_snapshots, resolve_ref
 from ...storage import get_text
 from ..deps import Principal, viewer
@@ -23,9 +24,9 @@ from ..deps import Principal, viewer
 router = APIRouter()
 
 
-def _snap(db: Session, ref: str) -> Snapshot:
+def _snap(db: Session, ref: str, relative_to: Snapshot | None = None) -> Snapshot:
     try:
-        return resolve_ref(db, ref)
+        return resolve_ref(db, ref, relative_to=relative_to)
     except SnapshotNotFound as e:
         raise HTTPException(404, str(e)) from e
 
@@ -41,10 +42,14 @@ def _graph(db: Session, snap: Snapshot) -> tuple[dict, dict]:
         nodes[name] = {"id": name, "managed": True, "platform": meta.get("platform"), "site": meta.get("site"),
                        "role": meta.get("role"), "status": status}
     edges: dict[tuple, dict] = {}
+    facts = {d: {"device": f} for d, f in db.execute(select(StateRow.device_name, StateRow.data).where(
+        StateRow.snapshot_id == snap.id, StateRow.table_name == "facts", StateRow.key == "device"))}
+    aliases = device_aliases(nodes, facts)  # neighbors name the hostname; nodes use the inventory name
     rows = db.execute(select(StateRow.device_name, StateRow.data).where(
         StateRow.snapshot_id == snap.id, StateRow.table_name == "neighbors"))
     for dev, n in rows:
         rd = n.get("remote_device") or "unknown"
+        rd = aliases.get(_alias(rd), rd)
         if rd not in nodes:
             nodes[rd] = {"id": rd, "managed": False, "platform": n.get("remote_platform"), "site": None,
                          "role": None, "status": None}
@@ -68,7 +73,7 @@ def topology(_: Principal = Depends(viewer), db: Session = Depends(get_db),
     for e in edges.values():
         e["change"] = "unchanged"
     if compare:
-        old = _snap(db, compare)
+        old = _snap(db, compare, relative_to=snap)
         old_nodes, old_edges = _graph(db, old)
         for k, e in old_edges.items():
             if k not in edges:
@@ -110,7 +115,8 @@ def _config_text(db: Session, snap: Snapshot, device: str) -> str | None:
 def config_diff(device: str, _: Principal = Depends(viewer), db: Session = Depends(get_db),
                 from_: str = Query("previous", alias="from"), to: str = "latest", context: int = Query(3, ge=0, le=50)):
     """Unified diff of the running config (secrets masked, volatile lines dropped)."""
-    a, b = _snap(db, from_), _snap(db, to)
+    b = _snap(db, to)
+    a = _snap(db, from_, relative_to=b)
     old, new = _config_text(db, a, device), _config_text(db, b, device)
     if old is None or new is None:
         raise HTTPException(404, "No running config stored for that device in one of the snapshots")
@@ -237,7 +243,8 @@ def report_changes(_: Principal = Depends(viewer), db: Session = Depends(get_db)
                    from_: str = Query("24h", alias="from"), to: str = "latest",
                    format: str = Query("html", pattern="^(html|csv|xlsx)$")):
     """Everything that changed in a window, grouped by table."""
-    a, b = _snap(db, from_), _snap(db, to)
+    b = _snap(db, to)
+    a = _snap(db, from_, relative_to=b)
     if a.created_at > b.created_at:
         a, b = b, a
     d = diff_snapshots(db, a, b)

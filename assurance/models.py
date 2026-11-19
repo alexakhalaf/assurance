@@ -235,6 +235,8 @@ class DeviceCollection(Base):
     error: Mapped[str | None] = mapped_column(Text)
     warnings: Mapped[list] = mapped_column(JSONType, default=list)
     row_counts: Mapped[dict] = mapped_column(JSONType, default=dict)
+    # Tables whose command failed on this device (timeout, refused, parser error): unknown, not empty.
+    failed_tables: Mapped[list] = mapped_column(JSONType, default=list, server_default="[]")
 
     snapshot: Mapped[Snapshot] = relationship(back_populates="collections")
 

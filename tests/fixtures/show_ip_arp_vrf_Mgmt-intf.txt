@@ -1,0 +1,3 @@
+Protocol  Address          Age (min)  Hardware Addr   Type   Interface
+Internet  10.255.0.1              3   0050.56ab.1234  ARPA   GigabitEthernet4
+Internet  10.255.0.10             -   0050.56ab.0004  ARPA   GigabitEthernet4

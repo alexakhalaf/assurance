@@ -157,7 +157,7 @@ def test_l2_fhrp_ntp_tables(client, two_snapshots, view_h):
     assert fhrp["Vlan100|hsrp|10"]["state"] == "standby" and fhrp["GigabitEthernet2|hsrp|1"]["state"] == "active"
     ntp = {(r["device"], r["key"]): r for r in t("ntp")["items"]}
     assert not ntp[("yyc-core-rtr01", "10.0.0.1")]["synchronized"]
-    assert ntp[("yyc-dc-nxs01", "10.0.0.1")]["vrf"] == "management"
+    assert ntp[("yyc-dc-nxs01", "management|10.0.0.1")]["vrf"] == "management"
     # HSRP authentication text from show output is masked before storage
     raw = client.get(f"{API}/snapshots/latest/raw/yyc-dc-nxs01/show_hsrp_all", headers=view_h).text
     assert '"cisco"' not in raw and "Authentication text <removed>" in raw
@@ -277,7 +277,7 @@ def test_discovery(client, two_snapshots, admin_h, view_h):
 def test_snmp_aaa_tables(client, two_snapshots, view_h):
     t = lambda table, **p: client.get(f"{API}/snapshots/latest/tables/{table}", params=p, headers=view_h).json()  # noqa: E731
     snmp = {(r["device"], r["key"]): r for r in t("snmp")["items"]}
-    assert snmp[("yyc-core-rtr01", "community#1")]["acl"] == "10"
+    assert snmp[("yyc-core-rtr01", "community|ro|10")]["acl"] == "10"
     assert snmp[("yyc-dc-nxs01", "host|10.250.0.30")]["vrf"] == "management"
     assert snmp[("yyc-core-rtr01", "user|nms-poller")]["auth"] is True
     aaa = {(r["device"], r["key"]): r for r in t("aaa")["items"]}
