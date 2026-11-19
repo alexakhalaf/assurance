@@ -12,27 +12,36 @@ timers). Normalizing keeps only state we care about, so diffs show real change.
 """
 from __future__ import annotations
 
+import ipaddress
 import re
 
-_IF_PREFIXES = [
-    ("TwentyFiveGigE", ("Twe",)), ("HundredGigE", ("Hu",)), ("FortyGigabitEthernet", ("Fo",)),
-    ("TenGigabitEthernet", ("Te",)), ("GigabitEthernet", ("Gi",)), ("FastEthernet", ("Fa",)),
-    ("Ethernet", ("Eth", "Et")), ("Port-channel", ("Po",)), ("Loopback", ("Lo",)),
-    ("loopback", ()), ("Vlan", ("Vl",)), ("Tunnel", ("Tu",)),
-]
+# Canonical interface names. Genie mostly prints full names, but not always in the same form: NX-OS
+# "show interface" says "port-channel10" / "loopback0" while its port-channel, VLAN, OSPF and route
+# parsers say "Port-channel10" / "Loopback0", and MAC tables or neighbor tables can carry short forms
+# ("Tw1/0/1", "Eth1/1"). Every table is keyed by the canonical name so they can be joined.
+# Matching is case-insensitive; longest abbreviation wins ("Twe" before "Tw", "Fou" before "Fo").
+_IF_NAMES = {
+    "FourHundredGigE": ("Fou",), "TwoHundredGigE": ("TwoH",), "HundredGigE": ("Hu",),
+    "FiftyGigE": ("Fif",), "FortyGigabitEthernet": ("Fo",), "TwentyFiveGigE": ("Twe",),
+    "TenGigabitEthernet": ("Te",), "FiveGigabitEthernet": ("Fi",), "TwoGigabitEthernet": ("Tw",),
+    "AppGigabitEthernet": ("Ap",), "GigabitEthernet": ("Gi", "Gig"), "FastEthernet": ("Fa",),
+    "Ethernet": ("Eth", "Et"), "Port-channel": ("Po",), "Loopback": ("Lo",), "Vlan": ("Vl",),
+    "Tunnel": ("Tu",), "Serial": ("Se",), "BDI": ("BD",), "Null": ("Nu",), "Dialer": ("Di",),
+    "Multilink": ("Mu",), "Virtual-Access": ("Vi",), "Virtual-Template": ("Vt",),
+}
+_IF_LOOKUP = {k.lower(): long for long, shorts in _IF_NAMES.items() for k in (long, *shorts)}
 
 
 def expand_ifname(name):
     if not name:
         return name
-    m = re.match(r"^([A-Za-z-]+)(\d.*)$", name.strip())
+    name = name.strip()
+    m = re.match(r"^([A-Za-z-]+)(\d.*)$", name)
     if not m:
-        return name.strip()
+        return name
     prefix, rest = m.groups()
-    for long, shorts in _IF_PREFIXES:
-        if prefix == long or prefix in shorts:
-            return long + rest
-    return name.strip()
+    long = _IF_LOOKUP.get(prefix.lower())
+    return long + rest if long else name
 
 
 def normalize_mac(mac):
@@ -117,8 +126,10 @@ def normalize_duplex(v) -> str | None:
 def interfaces(g: dict) -> dict:
     out = {}
     for name, i in (g or {}).items():
+        if not isinstance(i, dict):
+            continue
         enabled = i.get("enabled")
-        out[name] = {
+        out[expand_ifname(name)] = {
             "admin_status": "up" if enabled else "down",
             "oper_status": i.get("oper_status") or i.get("line_protocol") or "down",
             "description": i.get("description"),
@@ -137,11 +148,24 @@ def interfaces(g: dict) -> dict:
 _CONNECTED = {"connected", "direct", "local"}
 
 
+def _ip(v):
+    """Canonical text of an address or prefix (IOS-XE prints IPv6 in upper case, NX-OS in lower)."""
+    if not v or not isinstance(v, str):
+        return v
+    try:
+        return str(ipaddress.ip_network(v, strict=False)) if "/" in v else str(ipaddress.ip_address(v))
+    except ValueError:
+        return v
+
+
 def routes(g: dict) -> dict:
+    """IPv4 and IPv6 routes of every VRF ('show ip route' and 'show ipv6 route' share one schema)."""
     out = {}
     for vrf, v in (g or {}).get("vrf", {}).items():
-        table = v.get("address_family", {}).get("ipv4", {}).get("routes", {})
-        for prefix, r in table.items():
+        afs = v.get("address_family", {})
+        table = [(p, r) for af in ("ipv4", "ipv6") for p, r in (afs.get(af, {}).get("routes") or {}).items()]
+        for prefix, r in table:
+            prefix = _ip(prefix)
             proto = r.get("source_protocol") or ""
             if proto == "direct":
                 proto = "connected"
@@ -149,7 +173,7 @@ def routes(g: dict) -> dict:
             hops = set()
             for h in nh.get("next_hop_list", {}).values():
                 hop_proto = h.get("source_protocol", proto)
-                via = None if hop_proto in _CONNECTED or proto in _CONNECTED else h.get("next_hop")
+                via = None if hop_proto in _CONNECTED or proto in _CONNECTED else _ip(h.get("next_hop"))
                 hops.add((via, expand_ifname(h.get("outgoing_interface"))))
             for ifname in nh.get("outgoing_interface", {}):
                 hops.add((None, expand_ifname(ifname)))
@@ -178,10 +202,14 @@ def interface_vrfs(norm_routes: dict) -> dict:
 
 # ----------------------------------------------------------------------- arp
 
-def arp(g: dict, if_vrf: dict) -> dict:
+def arp(g: dict, if_vrf: dict, vrf: str | None = None) -> dict:
+    """ARP entries. `vrf` is given for per-VRF output ('show ip arp vrf X' doesn't name the VRF);
+    otherwise the VRF is inferred from the interface's connected routes."""
     out = {}
+    fixed = vrf
     for ifname, i in (g or {}).get("interfaces", {}).items():
-        vrf = if_vrf.get(ifname, "default")
+        ifname = expand_ifname(ifname)
+        vrf = fixed or if_vrf.get(ifname, "default")
         for ip, n in i.get("ipv4", {}).get("neighbors", {}).items():
             mac = n.get("link_layer_address", "")
             if not mac or mac.lower() == "incomplete":
@@ -205,9 +233,28 @@ def cdp(g: dict) -> dict:
             "remote_device": remote,
             "remote_interface": expand_ifname(n.get("port_id")),
             "remote_platform": n.get("platform"),
-            "mgmt_ip": next(iter(addrs), None),
+            "mgmt_ip": next((a for a in map(_mgmt_ip, addrs) if a), None),
         }
     return out
+
+
+_NOT_ADVERTISED = {"", "not advertised", "null", "none", "n/a"}
+
+
+def _advertised(v):
+    return None if v is None or str(v).strip().lower() in _NOT_ADVERTISED else str(v).strip()
+
+
+def _mgmt_ip(v):
+    """A management address only when it is an IP: NX-OS shows a MAC there when the neighbor
+    advertises one, and 'not advertised' when it advertises nothing."""
+    v = _advertised(v)
+    if not v:
+        return None
+    try:
+        return str(ipaddress.ip_address(v.split("%")[0]))
+    except ValueError:
+        return None
 
 
 # Genie title-cases every LLDP port id, which mangles names other vendors write in lower case
@@ -226,30 +273,65 @@ def lldp(g: dict) -> dict:
         local = expand_ifname(ifname)
         for port_id, p in i.get("port_id", {}).items():
             for nname, n in p.get("neighbors", {}).items():
-                remote = _short_host(n.get("system_name") or nname or n.get("chassis_id"))
+                # Neighbors without a system name (phones, servers, other vendors) print "not
+                # advertised" (or "null"): use the chassis id so they don't all merge into one node.
+                remote = _short_host(_advertised(n.get("system_name")) or _advertised(nname)
+                                     or _advertised(n.get("chassis_id")) or f"{local}-neighbor")
                 out[f"lldp|{local}|{remote}"] = {
                     "protocol": "lldp",
                     "local_interface": local,
                     "remote_device": remote,
                     "remote_interface": _lldp_port(n.get("port_id") or port_id),
                     "remote_platform": n.get("system_description") or None,
-                    "mgmt_ip": n.get("management_address") or n.get("management_address_v4"),
+                    "mgmt_ip": _mgmt_ip(n.get("management_address")) or _mgmt_ip(n.get("management_address_v4"))
+                    or _mgmt_ip(n.get("management_address_v6")),
                 }
     return out
 
 
+def merge_routes(*outputs: dict | None) -> dict:
+    """One Genie route dict from several outputs ('show ip route', 'show ipv6 route', per-VRF runs)."""
+    merged: dict = {"vrf": {}}
+    for g in outputs:
+        for vrf, v in ((g or {}).get("vrf") or {}).items():
+            afs = merged["vrf"].setdefault(vrf, {"address_family": {}})["address_family"]
+            for af, a in (v.get("address_family") or {}).items():
+                afs.setdefault(af, {"routes": {}})["routes"].update(a.get("routes") or {})
+    return merged
+
+
 def normalize(genie: dict[str, dict]) -> dict:
-    """genie is {table: genie_dict} using the keys from commands.COMMANDS."""
-    r = routes(genie.get("routes"))
+    """genie is {table: genie_dict} using the keys from commands.COMMANDS. Per-VRF outputs of IOS-XE
+    come as "routes@<vrf>", "routes6@<vrf>" and "arp@<vrf>"."""
+    r = routes(merge_routes(*(g for k, g in sorted(genie.items()) if k.split("@")[0] in ("routes", "routes6"))))
+    if_vrf = interface_vrfs(r)
+    arp_rows = arp(genie.get("arp"), if_vrf)
+    for k, g in sorted(genie.items()):
+        if k.startswith("arp@"):
+            arp_rows.update(arp(g, if_vrf, vrf=k.split("@", 1)[1]))
     return {
         "facts": facts(genie.get("version")),
         "interfaces": interfaces(genie.get("interfaces")),
         "routes": r,
-        "arp": arp(genie.get("arp"), interface_vrfs(r)),
+        "arp": arp_rows,
         "neighbors": {**cdp(genie.get("cdp")), **lldp(genie.get("lldp"))},
         **{t: fn(genie.get(t)) for t, fn in TECH_NORMALIZERS.items()},
         "fhrp": {**hsrp(genie.get("hsrp")), **vrrp(genie.get("vrrp"))},
     }
+
+
+# Which normalized tables each command feeds: when a command fails, these tables are unknown for
+# that device (not empty), so a diff doesn't report all of their rows as removed.
+SOURCE_TABLES = {
+    "version": ("facts",), "interfaces": ("interfaces",), "routes": ("routes", "arp"), "routes6": ("routes",),
+    "arp": ("arp",), "cdp": ("neighbors",), "lldp": ("neighbors",), "hsrp": ("fhrp",), "vrrp": ("fhrp",),
+    "config": ("config", "snmp", "aaa"),
+}
+
+
+def tables_fed_by(source: str) -> tuple[str, ...]:
+    base = source.split("@")[0]
+    return SOURCE_TABLES.get(base, (base,))
 
 
 # ---------------------------------------------------------------------- bgp
@@ -480,7 +562,9 @@ def hsrp(g: dict) -> dict:
                     if not vip and x.get("link_local_ipv6_address"):
                         vip = x["link_local_ipv6_address"].get("address")
                     ifn = expand_ifname(ifname)
-                    out[f"{ifn}|hsrp|{grp}"] = {
+                    # IPv4 and IPv6 groups may share a number on one interface (HSRPv2)
+                    key = f"{ifn}|hsrp|{grp}" if af == "ipv4" else f"{ifn}|hsrp|{grp}|{af}"
+                    out[key] = {
                         "interface": ifn, "protocol": "hsrp", "group": int(grp), "version": int(ver),
                         "address_family": af, "state": (x.get("hsrp_router_state") or "unknown").lower(),
                         "priority": x.get("priority") or x.get("configured_priority"),
@@ -515,15 +599,22 @@ def ntp(g: dict) -> dict:
     g = g or {}
     for peer, p in (g.get("peer") or {}).items():  # IOS-XE
         for mode in (p.get("local_mode") or {}).values():
-            out[peer] = {"peer": peer, "vrf": mode.get("vrf") or "default", "stratum": mode.get("stratum"),
-                         "mode": (mode.get("mode") or "unknown").lower(), "configured": bool(mode.get("configured")),
-                         "synchronized": mode.get("mode") == "synchronized"}
+            vrf = mode.get("vrf") or "default"
+            out[_ntp_key(vrf, peer)] = {
+                "peer": peer, "vrf": vrf, "stratum": mode.get("stratum"),
+                "mode": (mode.get("mode") or "unknown").lower(), "configured": bool(mode.get("configured")),
+                "synchronized": mode.get("mode") == "synchronized"}
     for vrf, v in (g.get("vrf") or {}).items():  # NX-OS
         for peer, p in (v.get("peer") or {}).items():
-            out[peer] = {"peer": peer, "vrf": vrf, "stratum": p.get("stratum"),
-                         "mode": (p.get("mode") or "unknown").lower(), "configured": True,
-                         "synchronized": p.get("mode") == "synchronized"}
+            out[_ntp_key(vrf, peer)] = {
+                "peer": peer, "vrf": vrf, "stratum": p.get("stratum"),
+                "mode": (p.get("mode") or "unknown").lower(), "configured": True,
+                "synchronized": p.get("mode") == "synchronized"}
     return out
+
+
+def _ntp_key(vrf: str, peer: str) -> str:
+    return peer if vrf == "default" else f"{vrf}|{peer}"  # one server can be used from two VRFs
 
 
 TECH_NORMALIZERS = {"bgp": bgp, "ospf": ospf, "mac": mac, "vlans": vlans, "vrfs": vrfs, "hardware": hardware,

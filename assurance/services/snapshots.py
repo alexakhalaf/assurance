@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from .. import jobs, metrics, tracing
 from ..collection import hostkeys
 from ..collection.collectors import LiveCollector, MockCollector
-from ..collection.commands import COMMANDS, all_commands
+from ..collection.commands import COMMANDS, commands_for_raw
 from ..collection.pipeline import parse_device, sanitize_raw
 from ..collection.target import Target
 from ..config import get_settings
@@ -38,7 +38,7 @@ from ..models import (
 from ..storage import put_text
 from . import audit
 from . import credentials as cred_svc
-from .diff import DIFFABLE, diff_summary, row_hash
+from .diff import DIFFABLE, baseline, diff_summary, row_hash, row_key
 from .inventory import resolve_scope
 
 log = logging.getLogger(__name__)
@@ -157,18 +157,18 @@ def _run_device_collection(collection_id: int) -> None:
             with tracing.span("device commands", device=device_name):
                 raw = sanitize_raw(target, collector.collect(target))
             with tracing.span("genie parse", device=device_name, commands=len(raw)):
-                genie, norm, warnings = parse_device(target, raw)
+                genie, norm, warnings, failed_tables = parse_device(target, raw)
             tracing.annotate(parser_warnings=len(warnings))
             for w in warnings:
                 metrics.PARSER_WARNINGS.labels(platform, w.split(":", 1)[0]).inc()
 
             parser_version = _genie_version()
             stored = []
-            for table, cmd in all_commands(target.platform).items():
-                key, digest, size = put_text(raw.get(table, ""), "raw")
+            for table, cmd in commands_for_raw(target.platform, raw).items():
+                key, digest, size = put_text(raw.get(table) or "", "raw")
                 stored.append(RawOutput(snapshot_id=snapshot_id, device_name=device_name, command=cmd, kind="raw",
                                         object_key=key, sha256=digest, size=size, parser_version=parser_version))
-                if table not in COMMANDS[target.platform]:
+                if table not in COMMANDS[target.platform] and "@" not in table:
                     continue
                 gkey, gdigest, gsize = put_text(json.dumps(genie.get(table, {}), sort_keys=True), "genie")
                 stored.append(RawOutput(snapshot_id=snapshot_id, device_name=device_name, command=cmd,
@@ -180,7 +180,7 @@ def _run_device_collection(collection_id: int) -> None:
                 counts[table] = len(records)
                 for k, data in records.items():
                     rows.append({"snapshot_id": snapshot_id, "device_name": device_name, "table_name": table,
-                                 "key": k, "data": data, "row_hash": row_hash(data)})
+                                 "key": row_key(k), "data": data, "row_hash": row_hash(data)})
 
             with session_scope() as db:
                 dc = db.get(DeviceCollection, collection_id)
@@ -193,6 +193,7 @@ def _run_device_collection(collection_id: int) -> None:
                 facts = norm.get("facts", {}).get("device") or {}
                 status = CollectionStatus.partial if warnings else CollectionStatus.ok
                 dc.status, dc.warnings, dc.row_counts = status, warnings, counts
+                dc.failed_tables = failed_tables
                 if device is not None:
                     for attr in ("hostname", "model", "serial", "os_version"):
                         if facts.get(attr):
@@ -323,9 +324,9 @@ def _finalize(snapshot_id: str) -> None:
             StateRow.snapshot_id == snapshot_id).group_by(StateRow.table_name)).all())
         summary = {"rows": rows, "devices_ok": good, "devices_failed": len(statuses) - good}
         if snap.status in DIFFABLE:
-            prev = db.scalar(select(Snapshot).where(
-                Snapshot.status.in_(DIFFABLE), Snapshot.created_at < snap.created_at, Snapshot.id != snap.id)
-                .order_by(Snapshot.created_at.desc()).limit(1))
+            # the newest earlier snapshot covering the same devices: an ad-hoc one-device snapshot taken in
+            # between must not become the baseline of a fleet-wide one (its other devices would go unseen)
+            prev = baseline(db, snap, before=snap.created_at, strict=True)
             if prev is not None:
                 s = diff_summary(db, prev, snap)
                 summary["changes"] = {"previous": prev.id, "total": s["total"], "added": s["added"],

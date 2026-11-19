@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import threading
 from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
@@ -34,6 +35,17 @@ def row_hash(data: dict) -> str:
     return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
 
 
+KEY_MAX = 512  # state_rows.key column
+
+
+def row_key(key: str) -> str:
+    """Row keys fit the column: a longer one (a very long top-level config line) is cut and given a
+    hash suffix, so it stays unique and the same in every snapshot."""
+    if len(key) <= KEY_MAX:
+        return key
+    return key[:KEY_MAX - 18] + " #" + hashlib.sha256(key.encode()).hexdigest()[:16]
+
+
 # ------------------------------------------------------------- ref resolution
 
 
@@ -50,19 +62,31 @@ def _parse_time(ref: str, now: datetime) -> datetime | None:
     return t if t.tzinfo else t.replace(tzinfo=UTC)
 
 
-def resolve_ref(db: Session, ref: str, now: datetime | None = None) -> Snapshot:
+def resolve_ref(db: Session, ref: str, now: datetime | None = None, *, relative_to: Snapshot | None = None) -> Snapshot:
     """A snapshot id, 'latest', 'previous', an ISO time, 'now', or an age like '90m', '24h', '7d'.
 
-    Times resolve to the newest diffable snapshot taken at or before that time.
+    Times resolve to the newest diffable snapshot taken at or before that time. With `relative_to`
+    (the other end of a diff), 'previous' means the one before it, and both 'previous' and times
+    prefer a snapshot that covers the same devices: a one-device ad-hoc snapshot is not used as the
+    baseline of a fleet-wide diff when a fleet-wide one is available.
     """
     ref = (ref or "").strip()
     base = select(Snapshot).where(Snapshot.status.in_(DIFFABLE))
-    if ref in ("latest", "previous"):
-        snaps = list(db.scalars(base.order_by(Snapshot.created_at.desc()).limit(2)))
-        idx = 0 if ref == "latest" else 1
-        if len(snaps) <= idx:
-            raise SnapshotNotFound(f"no {ref} snapshot")
-        return snaps[idx]
+    if ref == "latest":
+        snap = db.scalar(base.order_by(Snapshot.created_at.desc()).limit(1))
+        if snap is None:
+            raise SnapshotNotFound("no latest snapshot")
+        return snap
+    if ref == "previous":
+        if relative_to is None:
+            snaps = list(db.scalars(base.order_by(Snapshot.created_at.desc()).limit(2)))
+            if len(snaps) < 2:
+                raise SnapshotNotFound("no previous snapshot")
+            relative_to = snaps[0]
+        snap = baseline(db, relative_to, before=relative_to.created_at, strict=True)
+        if snap is None:
+            raise SnapshotNotFound("no previous snapshot")
+        return snap
     snap = db.get(Snapshot, ref)
     if snap is not None:
         if snap.status not in DIFFABLE:
@@ -71,10 +95,34 @@ def resolve_ref(db: Session, ref: str, now: datetime | None = None) -> Snapshot:
     t = _parse_time(ref, now or datetime.now(UTC))
     if t is None:
         raise SnapshotNotFound(f"unknown snapshot reference {ref!r}")
-    snap = db.scalar(base.where(Snapshot.created_at <= t).order_by(Snapshot.created_at.desc()).limit(1))
+    snap = baseline(db, relative_to, before=t) if relative_to is not None else db.scalar(
+        base.where(Snapshot.created_at <= t).order_by(Snapshot.created_at.desc()).limit(1))
     if snap is None:
         raise SnapshotNotFound(f"no snapshot at or before {t.isoformat()}")
     return snap
+
+
+def baseline(db: Session, snap: Snapshot, before: datetime, strict: bool = False,
+             candidates: int = 50) -> Snapshot | None:
+    """The newest diffable snapshot taken before `before` (at or before, unless strict) that covers
+    nearly all of `snap`'s devices (90%, so one device added to inventory or skipped doesn't push the
+    baseline back by hours). Falls back to the one covering the most of them, newest first, so a diff
+    always has a baseline when any older snapshot exists."""
+    when = Snapshot.created_at < before if strict else Snapshot.created_at <= before
+    rows = list(db.scalars(select(Snapshot).where(Snapshot.status.in_(DIFFABLE), when, Snapshot.id != snap.id)
+                           .order_by(Snapshot.created_at.desc()).limit(candidates)))
+    if not rows:
+        return None
+    want = set(db.scalars(select(DeviceCollection.device_name).where(DeviceCollection.snapshot_id == snap.id)))
+    if not want:
+        return rows[0]
+    cover = dict(db.execute(
+        select(DeviceCollection.snapshot_id, func.count())
+        .where(DeviceCollection.snapshot_id.in_([r.id for r in rows]), DeviceCollection.device_name.in_(want))
+        .group_by(DeviceCollection.snapshot_id)).all())
+    best = max(rows, key=lambda r: (cover.get(r.id, 0), r.created_at))
+    need = min(cover.get(best.id, 0), math.ceil(0.9 * len(want)))
+    return next(r for r in rows if cover.get(r.id, 0) >= need)  # rows are newest first
 
 
 # --------------------------------------------------------------------- diff
@@ -88,6 +136,15 @@ def _collected(db: Session, snapshot_id: str) -> tuple[set[str], set[str]]:
     ):
         (ok if status in COLLECTED else failed).add(name)
     return ok, failed
+
+
+def failed_tables(db: Session, *snapshot_ids: str) -> set[tuple[str, str]]:
+    """(device, table) pairs whose command failed in any of the snapshots: unknown, not comparable."""
+    out = set()
+    for name, tables in db.execute(select(DeviceCollection.device_name, DeviceCollection.failed_tables)
+                                   .where(DeviceCollection.snapshot_id.in_(snapshot_ids))):
+        out.update((name, t) for t in tables or [])
+    return out
 
 
 def _changed_keys(db: Session, a_id: str, b_id: str, tables, devices) -> list[tuple]:
@@ -147,7 +204,8 @@ def diff_snapshots(db: Session, a: Snapshot, b: Snapshot, tables: list[str] | No
     both = sorted(a_ok & b_ok)
     unknown = sorted((a_all & b_all) - set(both))
 
-    diffs = _changed_keys(db, a.id, b.id, tables, both)
+    skip = failed_tables(db, a.id, b.id)
+    diffs = [d for d in _changed_keys(db, a.id, b.id, tables, both) if (d[0], d[1]) not in skip]
     data = _load(db, [i for *_, ia, ib in diffs for i in (ia, ib) if i is not None])
 
     changes = []
@@ -170,7 +228,8 @@ def diff_snapshots(db: Session, a: Snapshot, b: Snapshot, tables: list[str] | No
         "from": _snap_ref(a),
         "to": _snap_ref(b),
         "tables": tables,
-        "summary": summarize(changes, unknown, sorted(b_all - a_all), sorted(a_all - b_all)),
+        "summary": summarize(changes, unknown, sorted(b_all - a_all), sorted(a_all - b_all),
+                             _unknown_tables(skip, both, tables)),
         "changes": changes,
     }
     with _cache_lock:
@@ -192,9 +251,16 @@ def diff_summary(db: Session, a: Snapshot, b: Snapshot, tables: list[str] | None
         want = set(devices)
         a_ok, b_ok, a_all, b_all = a_ok & want, b_ok & want, a_all & want, b_all & want
     both = sorted(a_ok & b_ok)
+    skip = failed_tables(db, a.id, b.id)
     changes = [{"device": dev, "table": t, "change": "added" if ia is None else "removed" if ib is None else "changed"}
-               for dev, t, _k, ia, ib in _changed_keys(db, a.id, b.id, tables, both)]
-    return summarize(changes, sorted((a_all & b_all) - set(both)), sorted(b_all - a_all), sorted(a_all - b_all))
+               for dev, t, _k, ia, ib in _changed_keys(db, a.id, b.id, tables, both) if (dev, t) not in skip]
+    return summarize(changes, sorted((a_all & b_all) - set(both)), sorted(b_all - a_all), sorted(a_all - b_all),
+                     _unknown_tables(skip, both, tables))
+
+
+def _unknown_tables(skip: set, devices, tables) -> list[dict]:
+    devs, tabs = set(devices), set(tables)
+    return [{"device": d, "table": t} for d, t in sorted(skip) if d in devs and t in tabs]
 
 
 def _snap_ref(s: Snapshot) -> dict:
@@ -202,7 +268,7 @@ def _snap_ref(s: Snapshot) -> dict:
             "status": s.status, "labels": s.labels}
 
 
-def summarize(changes: list[dict], unknown=(), only_in_to=(), only_in_from=()) -> dict:
+def summarize(changes: list[dict], unknown=(), only_in_to=(), only_in_from=(), tables_unknown=()) -> dict:
     by_table: dict[str, dict] = {}
     by_device: dict[str, dict] = {}
     totals = {"added": 0, "removed": 0, "changed": 0}
@@ -219,6 +285,8 @@ def summarize(changes: list[dict], unknown=(), only_in_to=(), only_in_from=()) -
         "devices_unknown": list(unknown),
         "devices_only_in_to": list(only_in_to),
         "devices_only_in_from": list(only_in_from),
+        # (device, table) not compared because the command failed in one of the snapshots
+        "tables_unknown": list(tables_unknown),
     }
 
 
@@ -231,6 +299,8 @@ def render_text(diff: dict) -> str:
              f"{s['changed']} modified"]
     for d in s["devices_unknown"]:
         lines.append(f"? {d}: collection failed in one snapshot, not compared")
+    for u in s.get("tables_unknown", []):
+        lines.append(f"? {u['device']} [{u['table']}]: command failed in one snapshot, not compared")
     current = None
     for c in diff["changes"]:
         if c["device"] != current:

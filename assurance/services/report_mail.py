@@ -56,7 +56,7 @@ def _window_start(db: Session, window: str) -> str:
     from .diff import DIFFABLE, SnapshotNotFound, resolve_ref
 
     try:
-        return resolve_ref(db, window).id
+        return resolve_ref(db, window, relative_to=resolve_ref(db, "latest")).id
     except SnapshotNotFound:
         oldest = db.scalar(select(Snapshot).where(Snapshot.status.in_(DIFFABLE)).order_by(Snapshot.created_at))
         return oldest.id if oldest else window

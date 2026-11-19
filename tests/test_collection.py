@@ -15,8 +15,8 @@ def _parse(scenario):
     col = MockCollector(MOCK / scenario)
     out = {}
     for d in DEVICES:
-        _, norm, warnings = parse_device(d, col.collect(d))
-        assert warnings == []
+        _, norm, warnings, failed = parse_device(d, col.collect(d))
+        assert warnings == [] and failed == []
         out[d.name] = norm
     return out
 

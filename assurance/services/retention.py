@@ -3,7 +3,7 @@ and so is the newest complete snapshot, so the next one always has a baseline to
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import UTC, timedelta
 
 from sqlalchemy import delete, select
 
@@ -38,7 +38,7 @@ def thinned(after_days: int) -> list[str]:
     keep: dict = {}
     for sid, labels, status, created in rows:
         if status in KEEP_NEWEST and not is_evidence(labels):
-            keep[created.date()] = sid  # ordered by time, so the day's last one wins
+            keep[created.astimezone(UTC).date()] = sid  # ordered by time, so the day's last one wins
     kept = set(keep.values())
     return [sid for sid, labels, status, _ in rows
             if status not in OPEN and not is_evidence(labels) and sid not in kept]

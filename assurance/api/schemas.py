@@ -260,6 +260,7 @@ class DeviceCollectionOut(ORM):
     error: str | None
     warnings: list[str]
     row_counts: dict
+    failed_tables: list[str] = []
 
 
 class SnapshotOut(ORM):

@@ -89,6 +89,7 @@ export default function Compare() {
         </div>
       )}
       {all && all.devices_unknown.length > 0 && <div className="alert warn">Not compared because collection failed in one of the snapshots: {all.devices_unknown.slice(0, 20).join(", ")}{all.devices_unknown.length > 20 ? "…" : ""}</div>}
+      {all && (all.tables_unknown?.length ?? 0) > 0 && <div className="alert warn">Not compared because a command failed in one of the snapshots: {all.tables_unknown!.slice(0, 20).map((u: any) => `${u.device} ${u.table}`).join(", ")}{all.tables_unknown!.length > 20 ? "…" : ""}</div>}
       {all && (all.devices_only_in_to.length > 0 || all.devices_only_in_from.length > 0) && (
         <div className="alert info">
           {all.devices_only_in_to.length > 0 && <>Only in the later snapshot: {all.devices_only_in_to.slice(0, 20).join(", ")}. </>}
