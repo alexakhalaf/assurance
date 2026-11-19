@@ -193,8 +193,7 @@ A snapshot is one collection run over a set of devices. Snapshots never change o
   collected.
 
 On a lab or demo server that runs the mock collector, the form also has **Lab options → Mock
-scenario**. On a live server the API rejects that field. (Pull request 6 hides **Lab options**
-completely on live servers; until it is merged you may still see it.)
+scenario**. Live servers do not show it.
 
 From a device page, **Collect now** takes a snapshot of just that device.
 

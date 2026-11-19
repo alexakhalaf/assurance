@@ -5,8 +5,7 @@ change it, and what is still unproven. The README has the full configuration tab
 this document explains how the parts fit and where the risks are. The user-facing guide is
 [user-guide.md](user-guide.md).
 
-State at handoff (19 November 2026): release 0.5 (beta) on `main`, merged through PR 5. PR 6
-("Hide the lab (mock scenario) option on live servers") may still be open.
+State at handoff (19 November 2026): release 0.5 (beta) on `main`, merged through PR 6.
 
 ## 1. What it is
 
@@ -332,7 +331,9 @@ Run without devices by setting `ASSURANCE_COLLECTOR=mock`. The mock collector re
 `<ASSURANCE_MOCK_ROOT>/<scenario>/<device>/<command file>.txt`. A missing file means empty output
 (feature not in use); a file named `<command file>.txt.error` makes that command fail like a
 timeout. Snapshots choose the scenario with `mock_scenario` (API) or the hidden
-`--mock-scenario` CLI option; the API rejects it on a live server.
+`--mock-scenario` CLI option; the API rejects it on a live server. `GET /api/v1/system/info`
+returns `{version, collector}`; the UI shows **Lab options** on the New snapshot form only when
+`collector` is `mock`.
 
 ```bash
 ASSURANCE_COLLECTOR=mock ASSURANCE_JOB_BACKEND=thread \
@@ -388,9 +389,6 @@ role map, token signing keys) and the real mail relay (STARTTLS or SSL, auth, at
 - Topology is one level (no site grouping).
 - Helm chart never installed on a cluster; no failover test of the scheduler leader lock, Redis or
   PostgreSQL; no outside penetration test.
-- PR 6 (hide **Lab options** in the UI on live servers, add `GET /api/v1/system/info`) may still be
-  open. Until it merges, the New snapshot form shows a mock option that the API rejects on live
-  servers.
 
 **Accepted Trivy advisories (`.trivyignore`).** The image scan ignores five CVEs, all in packages
 pyATS pins:
