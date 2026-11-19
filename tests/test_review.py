@@ -297,3 +297,13 @@ def test_lldp_keeps_lower_case_non_cisco_port_names():
     assert _lldp_port("Et1/1") == "Ethernet1/1"
     assert _lldp_port("Ethernet1/2") == "Ethernet1/2"
     assert _lldp_port(None) is None
+
+
+def test_system_info_tells_the_ui_the_collector(client, view_h, monkeypatch):
+    from assurance.config import get_settings
+
+    assert client.get(f"{API}/system/info").status_code == 401
+    r = client.get(f"{API}/system/info", headers=view_h).json()
+    assert r["collector"] == "mock" and r["version"]
+    monkeypatch.setattr(get_settings(), "collector", "live")
+    assert client.get(f"{API}/system/info", headers=view_h).json()["collector"] == "live"

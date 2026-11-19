@@ -79,6 +79,8 @@ export default function Snapshots() {
 
 function NewSnapshot({ onClose, onStarted }: { onClose: () => void; onStarted: (id: string) => void }) {
   const sites = useApi<any[]>("/sites");
+  const info = useApi<{ collector: string }>("/system/info");
+  const lab = info.data?.collector === "mock";
   const [f, setF] = useState({ site: "", role: "", platform: "", tags: "", devices: "", labels: "", mock_scenario: "" });
   const [err, setErr] = useState<string | null>(null);
   const set = (k: string) => (e: any) => setF({ ...f, [k]: e.target.value });
@@ -93,7 +95,7 @@ function NewSnapshot({ onClose, onStarted }: { onClose: () => void; onStarted: (
     if (f.tags) scope.tags = list(f.tags);
     if (f.devices) scope.devices = list(f.devices);
     const body: any = { scope, labels: list(f.labels) };
-    if (f.mock_scenario) body.mock_scenario = f.mock_scenario;
+    if (lab && f.mock_scenario) body.mock_scenario = f.mock_scenario;
     try {
       const s = await api<Snapshot>("/snapshots", { method: "POST", body: JSON.stringify(body) });
       onStarted(s.id);
@@ -113,9 +115,11 @@ function NewSnapshot({ onClose, onStarted }: { onClose: () => void; onStarted: (
           <label>Tags (all must match)<input value={f.tags} onChange={set("tags")} placeholder="core, dc" /></label>
           <label className="span-2">Devices<input value={f.devices} onChange={set("devices")} placeholder="Comma separated names" /></label>
           <label className="span-2">Labels<input value={f.labels} onChange={set("labels")} placeholder="change:CHG0012345, pre" /></label>
-          <details className="span-2"><summary className="muted">Lab options</summary>
-            <label>Mock scenario (server must run the mock collector)<input value={f.mock_scenario} onChange={set("mock_scenario")} placeholder="t1" /></label>
-          </details>
+          {lab && (
+            <details className="span-2"><summary className="muted">Lab options</summary>
+              <label>Mock scenario (lab data set to read, e.g. t1 or t2)<input value={f.mock_scenario} onChange={set("mock_scenario")} placeholder="t1" /></label>
+            </details>
+          )}
         </div>
         <ErrorNote error={err} />
         <div className="row gap end"><button type="button" className="btn" onClick={onClose}>Cancel</button><button className="btn primary">Start snapshot</button></div>
