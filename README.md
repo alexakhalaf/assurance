@@ -7,6 +7,9 @@ every snapshot, and answers one question well: **what changed between time A and
 Everything is available over a versioned REST API first, with a web UI and a CLI on top. It has no
 dependency on any external source of truth or orchestrator.
 
+**Docs:** [User guide](docs/user-guide.md) for network engineers, and the
+[technical handoff](docs/handoff.md) for maintainers.
+
 ![Dashboard](docs/screenshots/dashboard.png)
 
 | ![1,000-device fleet](docs/screenshots/dashboard-1000-devices.png) | ![Dark theme](docs/screenshots/dashboard-dark.png) | ![Interfaces table](docs/screenshots/interfaces.png) |
