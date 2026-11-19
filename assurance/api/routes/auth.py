@@ -94,6 +94,14 @@ def me(p: Principal = Depends(current_principal)):
     return p.user
 
 
+@router.get("/system/info", tags=["system"])
+def system_info(_: Principal = Depends(current_principal)):
+    """What the UI needs to know about this server: version, and whether it runs the lab (mock) collector."""
+    from ... import __version__
+
+    return {"version": __version__, "collector": get_settings().collector}
+
+
 class PasswordChangeIn(BaseModel):
     current_password: str = Field(max_length=256)
     new_password: str = Field(min_length=12, max_length=256)
